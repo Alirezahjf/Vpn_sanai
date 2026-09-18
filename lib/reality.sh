@@ -265,7 +265,10 @@ reality_harvest_from_inbound() {
     VLESS_SNI="${VLESS_SNI:-$(printf '%s' "$json" | jq -r '.streamSettings.realitySettings.serverNames[0] // empty')}"
     VLESS_SHORT_ID="${VLESS_SHORT_ID:-$(printf '%s' "$json" | jq -r '.streamSettings.realitySettings.shortIds[0] // empty')}"
     VLESS_PRIVATE_KEY="${VLESS_PRIVATE_KEY:-$(printf '%s' "$json" | jq -r '.streamSettings.realitySettings.privateKey // empty')}"
-    VLESS_PUBLIC_KEY="${VLESS_PUBLIC_KEY:-$(printf '%s' "$json" | jq -r '.streamSettings.realitySettings.settings.publicKey // empty')}"
+    # realitySettings.settings is an object in current panels, but tolerate
+    # builds that return it string-encoded.
+    VLESS_PUBLIC_KEY="${VLESS_PUBLIC_KEY:-$(printf '%s' "$json" | jq -r \
+        '.streamSettings.realitySettings.settings | if type == "string" then (fromjson? // {}) else (. // {}) end | .publicKey // empty')}"
 
     local first_uuid first_flow
     first_uuid="$(printf '%s' "$json" | jq -r '.settings.clients[0].id // empty')"

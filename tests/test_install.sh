@@ -208,3 +208,58 @@ JSON
         [[ -n "${XHTTP_INBOUND_ID:-}" ]] || { echo "XHTTP_INBOUND_ID empty"; return 1; }
     ) || fail "کلیدها و SNI باید پس از ساخت Inbound در شل اصلی در دسترس باشند"
 }
+
+test_default_or_ask_resolves_named_default() {
+    # Regression: _default_or_ask received the NAME of a *_DEFAULT variable
+    # but used ${1:-} instead of ${!1}, so the literal string
+    # "PANEL_USER_DEFAULT" leaked into the panel's credentials and every
+    # report/summary.
+    (
+        set -Eeuo pipefail
+        VPN_SANAI_NO_MAIN=1
+        # shellcheck source=../install.sh
+        source "${TEST_DIR}/../install.sh"
+
+        SAMPLE_DEFAULT="file-value"
+        local out
+        out="$(_default_or_ask SAMPLE_DEFAULT "fallback" "برچسب")"
+        [[ "$out" == "file-value" ]] || { echo "named default -> '$out'"; return 1; }
+
+        EMPTY_DEFAULT=""
+        VPN_SANAI_NONINTERACTIVE=1
+        out="$(_default_or_ask EMPTY_DEFAULT "fallback" "برچسب")"
+        [[ "$out" == "fallback" ]] || { echo "empty default -> '$out'"; return 1; }
+        [[ "$out" != "EMPTY_DEFAULT" ]] || { echo "literal name leaked"; return 1; }
+    ) || fail "_default_or_ask باید مقدار متغیر نام‌برده را برگرداند، نه اسمش را"
+}
+
+test_panel_placeholder_secrets_healed() {
+    # Regression: servers installed by the buggy version carry the literal
+    # placeholder names in state and in the panel itself; the heal step must
+    # regenerate them (and flag creds/base so bootstrap re-applies them).
+    (
+        set -Eeuo pipefail
+        VPN_SANAI_NO_MAIN=1
+        # shellcheck source=../install.sh
+        source "${TEST_DIR}/../install.sh"
+
+        PANEL_USER="PANEL_USER_DEFAULT"
+        PANEL_PASS="PANEL_PASS_DEFAULT"
+        PANEL_BASE_PATH="/PANEL_BASE_PATH_DEFAULT/"
+        PANEL_BASE_PATH_RAW="PANEL_BASE_PATH_DEFAULT"
+        panel_heal_placeholder_secrets
+
+        [[ "$PANEL_USER" != "PANEL_USER_DEFAULT" && -n "$PANEL_USER" ]] || { echo "user='$PANEL_USER'"; return 1; }
+        [[ "$PANEL_PASS" != "PANEL_PASS_DEFAULT" && -n "$PANEL_PASS" ]] || { echo "pass='$PANEL_PASS'"; return 1; }
+        [[ "$PANEL_BASE_PATH" != "/PANEL_BASE_PATH_DEFAULT/" && "$PANEL_BASE_PATH" == /*/ ]] \
+            || { echo "base='$PANEL_BASE_PATH'"; return 1; }
+        ((PANEL_HEALED_CREDS == 1 && PANEL_HEALED_BASE == 1)) || { echo "flags not set"; return 1; }
+
+        # A healthy config must be left untouched.
+        PANEL_USER="real-user"; PANEL_PASS="real-pass"
+        PANEL_BASE_PATH="/abc123/"; PANEL_BASE_PATH_RAW="abc123"
+        panel_heal_placeholder_secrets
+        [[ "$PANEL_USER" == "real-user" && "$PANEL_PASS" == "real-pass" ]] || { echo "clobbered healthy values"; return 1; }
+        ((PANEL_HEALED_CREDS == 0 && PANEL_HEALED_BASE == 0)) || { echo "false positive heal"; return 1; }
+    ) || fail "مقادیر placeholder باید ترمیم و مقادیر سالم دست‌نخورده بمانند"
+}

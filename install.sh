@@ -309,6 +309,7 @@ collect_choices() {
     is_port "$PANEL_PORT" || die "پورت پنل نامعتبر است: ${PANEL_PORT}"
     port_in_use "$PANEL_PORT" && PANEL_PORT="$(choose_free_port "$PANEL_PORT" "$PANEL_PORT_RANGE_MIN" "$PANEL_PORT_RANGE_MAX" "پورت پنل")"
 
+    panel_heal_placeholder_secrets
     [[ -n "$PANEL_USER" ]] || PANEL_USER="$(_default_or_ask PANEL_USER_DEFAULT "$(rand_string 10 'a-z0-9')" "نام کاربری پنل")"
     [[ -n "$PANEL_PASS" ]] || PANEL_PASS="$(_default_or_ask PANEL_PASS_DEFAULT "$(rand_password 20)" "رمز عبور پنل")"
     [[ -n "$PANEL_BASE_PATH_RAW" ]] || PANEL_BASE_PATH_RAW="$(_default_or_ask PANEL_BASE_PATH_DEFAULT "$(rand_string 14 'a-zA-Z0-9')" "مسیر مخفی پنل")"
@@ -374,9 +375,10 @@ collect_choices() {
     fi
 }
 
-# _default_or_ask <default-from-file> <fallback> <prompt>
+# _default_or_ask <name-of-default-var> <fallback> <prompt>
+# $1 is the NAME of a *_DEFAULT variable — resolved indirectly (${!1}).
 _default_or_ask() {
-    local from_file="${1:-}" fallback="$2" prompt="$3"
+    local from_file="${!1:-}" fallback="$2" prompt="$3"
     if [[ -n "$from_file" ]]; then
         printf '%s' "$from_file"; return 0
     fi
@@ -402,6 +404,35 @@ _toggle_or_ask() {
 }
 
 # --- panel bootstrap ---------------------------------------------------------
+# Older runs suffered a nameref bug in _default_or_ask that leaked the literal
+# placeholder names ("PANEL_USER_DEFAULT", ...) into state AND into the panel's
+# own credentials/base path. Detect those leftovers and regenerate them; the
+# caller re-applies to the live panel when the CLI is available.
+PANEL_HEALED_CREDS=0
+PANEL_HEALED_BASE=0
+panel_heal_placeholder_secrets() {
+    PANEL_HEALED_CREDS=0
+    PANEL_HEALED_BASE=0
+    if [[ "${PANEL_USER:-}" == "PANEL_USER_DEFAULT" ]]; then
+        PANEL_USER="$(rand_string 10 'a-z0-9')"
+        PANEL_HEALED_CREDS=1
+    fi
+    if [[ "${PANEL_PASS:-}" == "PANEL_PASS_DEFAULT" ]]; then
+        PANEL_PASS="$(rand_password 20)"
+        PANEL_HEALED_CREDS=1
+    fi
+    if [[ "${PANEL_BASE_PATH_RAW:-}" == "PANEL_BASE_PATH_DEFAULT" \
+       || "${PANEL_BASE_PATH:-}" == "/PANEL_BASE_PATH_DEFAULT/" ]]; then
+        PANEL_BASE_PATH_RAW="$(rand_string 14 'a-zA-Z0-9')"
+        PANEL_BASE_PATH="$(normalise_base_path "$PANEL_BASE_PATH_RAW")"
+        PANEL_HEALED_BASE=1
+    fi
+    if ((PANEL_HEALED_CREDS || PANEL_HEALED_BASE)); then
+        log_warn "مقادیر placeholder ذخیره‌شده از نسخهٔ قبلی پیدا و با مقادیر تصادفی جدید جایگزین شد"
+    fi
+    return 0
+}
+
 # _panel_plan_* helpers keep the flow readable.
 bootstrap_panel() {
     local reinstall=0
@@ -421,6 +452,18 @@ bootstrap_panel() {
     panel_probe_settings 2>/dev/null || true
     panel_read_install_result || true
     PANEL_BASE_PATH_RAW="$(base_path_raw "$PANEL_BASE_PATH")"
+
+    # Heal literal placeholder leftovers from the _default_or_ask nameref bug
+    # and push the regenerated secrets into the live panel as well.
+    panel_heal_placeholder_secrets
+    if ((PANEL_HEALED_CREDS)) && [[ -x "${XUI_BIN:-}" ]]; then
+        panel_reset_credentials "$PANEL_USER" "$PANEL_PASS" \
+            || log_warn "اعمال نام کاربری/رمز ترمیم‌شده روی پنل ناموفق بود"
+    fi
+    if ((PANEL_HEALED_BASE)) && [[ -x "${XUI_BIN:-}" ]]; then
+        run_quiet panel_cli setting -webBasePath "$PANEL_BASE_PATH_RAW" \
+            || log_warn "اعمال مسیر مخفی ترمیم‌شده روی پنل ناموفق بود"
+    fi
 
     PANEL_SCHEME="http"
 
@@ -558,8 +601,16 @@ create_inbounds_and_clients() {
     # harvest it here; otherwise `set -u` aborts the final report on
     # ${VLESS_PUBLIC_KEY}, persisted state/links come out empty, and the
     # xhttp inbound below mints a different keypair instead of reusing this
-    # one.
-    reality_harvest_from_inbound "$(inbound_get_json "$tcp_id" 2>/dev/null || true)" || true
+    # one. Retry a few times: the panel may need a beat before a freshly
+    # created inbound is readable back.
+    local _harvest_try
+    for _harvest_try in 1 2 3 4 5; do
+        reality_harvest_from_inbound "$(inbound_get_json "$tcp_id" 2>/dev/null || true)" || true
+        [[ -n "${VLESS_PUBLIC_KEY:-}" ]] && break
+        sleep 1
+    done
+    [[ -n "${VLESS_PUBLIC_KEY:-}" ]] || \
+        log_warn "بازیابی مشخصات Inbound ${tcp_id} از پنل ناموفق بود (لینک‌ها از روی API پنل ساخته می‌شوند)"
 
     VLESS_UUID="${VLESS_UUID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || rand_hex 16)}"
     inbound_set_share_addr "$tcp_id" "$SERVER_IP" || true

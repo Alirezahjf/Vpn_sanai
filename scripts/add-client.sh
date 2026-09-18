@@ -68,9 +68,18 @@ ensure_panel_reachable
 
 client_add "$EMAIL" "$INBOUND" "$GB" "$DAYS" "$IP_LIMIT" "$VLESS_FLOW" || exit 1
 
-# UUID همان کلاینت را از پنل می‌خوانیم (هر کلاینت UUID مستقل دارد)
-info="$(client_info "$EMAIL" || true)"
-CLIENT_UUID="$(printf '%s' "${info:-{\}}" | jq -r '.client.id // .id // empty' 2>/dev/null || true)"
+# UUID همان کلاینت را از پنل می‌خوانیم (هر کلاینت UUID مستقل دارد). منبع
+# معتبر عضویتِ Inbound است؛ رکورد سراسری کلاینت در نسخه‌های جدید پنل فقط یک
+# id عددی دارد که UUID نیست.
+CLIENT_UUID="${CLIENT_UUID_ACTUAL:-}"
+if [[ -z "$CLIENT_UUID" ]]; then
+    CLIENT_UUID="$(client_uuid_in_inbound "$EMAIL" "$INBOUND" 2>/dev/null || true)"
+fi
+if [[ -z "$CLIENT_UUID" ]]; then
+    info="$(client_info "$EMAIL" || true)"
+    CLIENT_UUID="$(printf '%s' "${info:-{\}}" | jq -r '.client.id // .id // empty' 2>/dev/null || true)"
+    _is_uuid "${CLIENT_UUID:-}" || CLIENT_UUID=""
+fi
 [[ -n "$CLIENT_UUID" ]] || CLIENT_UUID="$VLESS_UUID"
 
 LINK="$(build_vless_link "$CLIENT_UUID" "$SERVER_IP" "$VLESS_PORT" "tcp" \

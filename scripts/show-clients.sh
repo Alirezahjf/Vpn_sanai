@@ -58,13 +58,30 @@ while read -r email; do
     [[ -n "$FILTER" && "$email" != "$FILTER" ]] && continue
 
     info="$(client_info "$email" 2>/dev/null || true)"
-    uuid="$(printf '%s' "${info:-{\}}" | jq -r '.client.id // .id // empty' 2>/dev/null || true)"
-    [[ -n "$uuid" ]] || uuid="$VLESS_UUID"
+    # Authoritative: the membership uuid on the inbound xray serves. Newer
+    # panels report a numeric row-id on the global client record — that must
+    # never be used as the link uuid.
+    uuid="$(client_uuid_in_inbound "$email" "${VLESS_INBOUND_ID:-}" 2>/dev/null || true)"
+    if [[ -z "$uuid" ]]; then
+        uuid="$(printf '%s' "${info:-{\}}" | jq -r '.client.id // .id // empty' 2>/dev/null || true)"
+        _is_uuid "${uuid:-}" || uuid=""
+    fi
+    # Offline fallback only for the installer-managed default client; anything
+    # else falls through to the panel's own share link below.
+    if [[ -z "$uuid" && ( "$email" == "${DEFAULT_CLIENT_EMAIL:-}" || -z "${DEFAULT_CLIENT_EMAIL:-}" ) ]]; then
+        uuid="$VLESS_UUID"
+    fi
     sub_id="$(printf '%s' "${info:-{\}}" | jq -r '.client.subId // .subId // empty' 2>/dev/null || true)"
     [[ -n "$sub_id" ]] || sub_id="$(client_sub_id "$email" 2>/dev/null || true)"
 
-    link="$(build_vless_link "$uuid" "$SERVER_IP" "$VLESS_PORT" "tcp" \
-            "$VLESS_SNI" "$VLESS_SHORT_ID" "$VLESS_PUBLIC_KEY" "$VLESS_FLOW" "$email")"
+    if [[ -n "$uuid" ]]; then
+        link="$(build_vless_link "$uuid" "$SERVER_IP" "$VLESS_PORT" "tcp" \
+                "$VLESS_SNI" "$VLESS_SHORT_ID" "$VLESS_PUBLIC_KEY" "$VLESS_FLOW" "$email")"
+    else
+        log_warn "«${email}» روی Inbound ${VLESS_INBOUND_ID:-?} عضو نیست؛ لینک از API پنل گرفته می‌شود"
+        link="$(client_links_api "$email" 2>/dev/null | head -1 || true)"
+        [[ -n "$link" ]] || { log_error "لینکی برای ${email} ساخته نشد"; continue; }
+    fi
     sub=""; [[ -n "$sub_id" ]] && sub="$(sub_url "$sub_id")"
 
     save_client_link "$email" "$link" "$sub"

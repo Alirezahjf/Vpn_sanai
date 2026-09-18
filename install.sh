@@ -552,6 +552,14 @@ create_inbounds_and_clients() {
     # fills VLESS_UUID/VLESS_PUBLIC_KEY/... from it.
     tcp_id="$(setup_reality_inbound "$VLESS_PORT" tcp "$VLESS_REMARK")" || die "ساخت Inbound اصلی ناموفق بود"
     VLESS_INBOUND_ID="$tcp_id"
+    # setup_reality_inbound necessarily runs inside a command-substitution
+    # subshell, so the VLESS_* material it resolves (reality keypair, chosen
+    # SNI, shortId) never reaches this shell. Read the inbound back and
+    # harvest it here; otherwise `set -u` aborts the final report on
+    # ${VLESS_PUBLIC_KEY}, persisted state/links come out empty, and the
+    # xhttp inbound below mints a different keypair instead of reusing this
+    # one.
+    reality_harvest_from_inbound "$(inbound_get_json "$tcp_id" 2>/dev/null || true)" || true
 
     VLESS_UUID="${VLESS_UUID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || rand_hex 16)}"
     inbound_set_share_addr "$tcp_id" "$SERVER_IP" || true
@@ -652,12 +660,12 @@ save_report() {
   توکن API     : ${PANEL_API_TOKEN}
 
 [کانفیگ VLESS + REALITY]
-  پورت         : ${VLESS_PORT}
-  SNI          : ${VLESS_SNI}
-  ShortId      : ${VLESS_SHORT_ID}
-  PublicKey    : ${VLESS_PUBLIC_KEY}
-  UUID پیش‌فرض  : ${VLESS_UUID}
-  Inbound ID   : ${VLESS_INBOUND_ID}
+  پورت         : ${VLESS_PORT:-}
+  SNI          : ${VLESS_SNI:-}
+  ShortId      : ${VLESS_SHORT_ID:-}
+  PublicKey    : ${VLESS_PUBLIC_KEY:-}
+  UUID پیش‌فرض  : ${VLESS_UUID:-}
+  Inbound ID   : ${VLESS_INBOUND_ID:-}
   xHTTP        : ${XHTTP_PORT:-غیرفعال} ${XHTTP_INBOUND_ID:+(inbound ${XHTTP_INBOUND_ID})}
 
 [امنیت]
@@ -697,9 +705,9 @@ final_summary() {
     kv "نام کاربری پنل" "$PANEL_USER"
     kv "رمز عبور پنل" "$PANEL_PASS"
     print_rule "کانفیگ VLESS + REALITY"
-    kv "آدرس کلاینت" "${SERVER_IP}:${VLESS_PORT}"
-    kv "SNI" "$VLESS_SNI"
-    kv "ShortId" "$VLESS_SHORT_ID"
+    kv "آدرس کلاینت" "${SERVER_IP}:${VLESS_PORT:-}"
+    kv "SNI" "${VLESS_SNI:-}"
+    kv "ShortId" "${VLESS_SHORT_ID:-}"
     local sub_id sub_link=""
     sub_id="$(client_sub_id "$DEFAULT_CLIENT_EMAIL" 2>/dev/null || true)"
     [[ -n "$sub_id" ]] && sub_link="$(sub_url "$sub_id")"
@@ -709,7 +717,7 @@ final_summary() {
     if [[ -n "${XHTTP_INBOUND_ID:-}" && -n "${XHTTP_PORT:-}" ]]; then
         local xhttp_link
         xhttp_link="$(build_vless_link "${VLESS_UUID:-}" "$SERVER_IP" "$XHTTP_PORT" "xhttp" \
-            "$VLESS_SNI" "$VLESS_SHORT_ID" "$VLESS_PUBLIC_KEY" "" \
+            "${VLESS_SNI:-}" "${VLESS_SHORT_ID:-}" "${VLESS_PUBLIC_KEY:-}" "" \
             "${VLESS_REMARK}-xhttp" "${XHTTP_PATH:-/}" "${XHTTP_MODE:-auto}")"
         print_rule "کانفیگ xHTTP (پورت ${XHTTP_PORT})"
         kv "لینک" "$xhttp_link"
@@ -1064,4 +1072,8 @@ main() {
     esac
 }
 
-main "$@"
+# Tests source this file to exercise individual functions; running main is
+# the default so piping / process substitution / direct execution all work.
+if [[ "${VPN_SANAI_NO_MAIN:-0}" != "1" ]]; then
+    main "$@"
+fi

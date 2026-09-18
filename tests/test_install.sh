@@ -158,3 +158,53 @@ test_scripts_are_user_friendly() {
         assert_contains "$out" "Usage" "اسکریپت ${script} باید راهنما داشته باشد" || return 1
     done
 }
+
+test_reality_material_reaches_parent_shell() {
+    # Regression: create_inbounds_and_clients ran setup_reality_inbound in a
+    # command-substitution subshell, so the reality keypair / chosen SNI /
+    # shortId it resolved never reached the caller. The final report then
+    # crashed on ${VLESS_PUBLIC_KEY} under `set -u` (line ~678) and the
+    # persisted state / links came out empty. The fix harvests the inbound
+    # back into the parent shell right after creation.
+    (
+        set -Eeuo pipefail
+        VPN_SANAI_NO_MAIN=1
+        # shellcheck source=../install.sh
+        source "${TEST_DIR}/../install.sh"
+
+        # The real setup_reality_inbound stays under test; only the helpers
+        # that need a live panel/xray are stubbed.
+        reality_inbound_exists() { return 1; }
+        reality_keypair()        { printf 'PRIVKEY PUBKEY\n'; }
+        reality_short_id()       { printf 'sid123\n'; }
+        pick_reality_sni()       { printf 'example.com\n'; }
+        reality_build_payload()  { printf '{}'; }
+        reality_create_inbound() { printf '7\n'; }
+        inbound_set_share_addr() { :; }
+        choose_free_port()       { printf '8444\n'; }
+        client_add()             { :; }
+        xray_restart()           { :; }
+        port_in_use()            { return 0; }
+        inbound_get_json() {
+            cat <<'JSON'
+{"id":7,"remark":"test","settings":{"clients":[{"id":"11111111-2222-3333-4444-555555555555","flow":"xtls-rprx-vision","email":"user1"}]},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"serverNames":["example.com"],"shortIds":["sid123"],"privateKey":"PRIVKEY","settings":{"publicKey":"PUBKEY"}}}}
+JSON
+        }
+
+        unset VLESS_PUBLIC_KEY VLESS_PRIVATE_KEY VLESS_SNI VLESS_SHORT_ID \
+              VLESS_UUID VLESS_INBOUND_ID VLESS_REMARK 2>/dev/null || true
+        VLESS_PORT=1443 SERVER_IP=203.0.113.10 CREATE_XHTTP=yes \
+            DEFAULT_CLIENT_EMAIL=user1 DEFAULT_CLIENT_TOTAL_GB=0 \
+            DEFAULT_CLIENT_EXPIRY_DAYS=0 DEFAULT_CLIENT_LIMIT_IP=0 \
+            VLESS_SNI_CHOICE=""
+        create_inbounds_and_clients >/dev/null 2>&1
+
+        [[ "$VLESS_INBOUND_ID"  == "7" ]] || { echo "VLESS_INBOUND_ID='$VLESS_INBOUND_ID'"; return 1; }
+        [[ "$VLESS_PUBLIC_KEY"  == "PUBKEY" ]] || { echo "VLESS_PUBLIC_KEY='$VLESS_PUBLIC_KEY'"; return 1; }
+        [[ "$VLESS_PRIVATE_KEY" == "PRIVKEY" ]] || { echo "VLESS_PRIVATE_KEY='$VLESS_PRIVATE_KEY'"; return 1; }
+        [[ "$VLESS_SNI"         == "example.com" ]] || { echo "VLESS_SNI='$VLESS_SNI'"; return 1; }
+        [[ "$VLESS_SHORT_ID"    == "sid123" ]] || { echo "VLESS_SHORT_ID='$VLESS_SHORT_ID'"; return 1; }
+        [[ "$VLESS_UUID" == "11111111-2222-3333-4444-555555555555" ]] || { echo "VLESS_UUID='$VLESS_UUID'"; return 1; }
+        [[ -n "${XHTTP_INBOUND_ID:-}" ]] || { echo "XHTTP_INBOUND_ID empty"; return 1; }
+    ) || fail "کلیدها و SNI باید پس از ساخت Inbound در شل اصلی در دسترس باشند"
+}

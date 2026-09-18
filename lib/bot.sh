@@ -1252,7 +1252,8 @@ bot_build_status_html() {
     local rows count
     rows="$(printf '%s' "$inbounds" | jq -r '
         .[]? | [.remark // .tag // (.id|tostring), (.port|tostring), .protocol,
-              (((.up // 0) + (.down // 0))), ((.settings|fromjson?).clients // [] | length)]
+              (((.up // 0) + (.down // 0))),
+              ((.settings | if type == "string" then fromjson? else . end).clients // [] | length)]
             | @tsv' 2>/dev/null || true)"
     if [[ -n "$rows" ]]; then
         text+=$'\n'"📡 <b>Inboundها</b>"
@@ -1293,13 +1294,15 @@ bot_render_status_edit() {
 bot_client_emails() {
     {
         client_list 2>/dev/null | jq -r '
+            def norm: if type == "string" then fromjson? else . end;
             if type=="array" and ((.[0]? // {}) | has("settings")) then
-                .[] | (.settings|fromjson?) | .clients[]? | .email
+                .[] | (.settings|norm) | .clients[]? | .email
             else
                 .[]? | (.email // .client.email // empty)
             end' 2>/dev/null || true
         api_get_obj "/panel/api/inbounds/list" 2>/dev/null | jq -r '
-            .[]? | (.settings|fromjson?) | .clients[]? | .email' 2>/dev/null || true
+            def norm: if type == "string" then fromjson? else . end;
+            .[]? | (.settings|norm) | .clients[]? | .email' 2>/dev/null || true
     } | grep -v '^$' | sort -u
 }
 

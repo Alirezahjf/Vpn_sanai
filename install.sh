@@ -603,14 +603,17 @@ create_inbounds_and_clients() {
     # xhttp inbound below mints a different keypair instead of reusing this
     # one. Retry a few times: the panel may need a beat before a freshly
     # created inbound is readable back.
-    local _harvest_try
+    local _harvest_try _harvest_resp=""
     for _harvest_try in 1 2 3 4 5; do
-        reality_harvest_from_inbound "$(inbound_get_json "$tcp_id" 2>/dev/null || true)" || true
+        _harvest_resp="$(inbound_get_json "$tcp_id" 2>/dev/null || true)"
+        reality_harvest_from_inbound "$_harvest_resp" || true
         [[ -n "${VLESS_PUBLIC_KEY:-}" ]] && break
         sleep 1
     done
-    [[ -n "${VLESS_PUBLIC_KEY:-}" ]] || \
+    if [[ -z "${VLESS_PUBLIC_KEY:-}" ]]; then
         log_warn "بازیابی مشخصات Inbound ${tcp_id} از پنل ناموفق بود (لینک‌ها از روی API پنل ساخته می‌شوند)"
+        log_warn "  پاسخ خام پنل (۲۰۰ نویسه): $(printf '%.200s' "${_harvest_resp:-<empty>}")"
+    fi
 
     VLESS_UUID="${VLESS_UUID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || rand_hex 16)}"
     inbound_set_share_addr "$tcp_id" "$SERVER_IP" || true

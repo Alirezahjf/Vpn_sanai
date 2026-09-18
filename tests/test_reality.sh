@@ -260,3 +260,25 @@ EOF
     rm -rf "$folder"
     assert_eq "PRIV2 PUB2" "$out" "قالب‌های جایگزین خروجی xray x25519"
 }
+
+test_inbound_get_json_tolerates_object_fields() {
+    # Regression: some panel builds return settings/streamSettings as JSON
+    # objects instead of serialized strings; `fromjson? // {}` then collapsed
+    # them to {} and the post-create harvest found nothing (real server: the
+    # summary showed empty SNI/ShortId and the xhttp link had pbk/sni/sid=).
+    api_get_obj() {
+        printf '%s' '{"id":19,"protocol":"vless","port":40454,"settings":{"clients":[{"id":"u6","flow":"xtls-rprx-vision","email":"user1"}]},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"serverNames":["ex.com"],"shortIds":["ab12"],"privateKey":"PRV","settings":{"publicKey":"PUB"}}},"sniffing":{"enabled":false}}'
+    }
+    local got
+    got="$(inbound_get_json 19 | jq -r '.streamSettings.realitySettings.settings.publicKey + "|" + .streamSettings.network + "|" + .settings.clients[0].id')"
+    [[ "$got" == "PUB|tcp|u6" ]] || { echo "got=$got"; return 1; }
+}
+
+test_reality_inbound_exists_tolerates_object_shape() {
+    api_get_obj() { printf '%s' '[{"id":7,"protocol":"vless","port":1443,"streamSettings":{"network":"tcp"}}]'; }
+    [[ "$(reality_inbound_exists 1443 tcp)" == "7" ]] || { echo "object-shape"; return 1; }
+    api_get_obj() { printf '%s' '[{"id":9,"protocol":"vless","port":1443,"streamSettings":"{\"network\":\"tcp\"}"}]'; }
+    [[ "$(reality_inbound_exists 1443 tcp)" == "9" ]] || { echo "string-shape"; return 1; }
+    api_get_obj() { printf '%s' '[]'; }
+    [[ -z "$(reality_inbound_exists 1443 tcp)" ]] || return 1
+}

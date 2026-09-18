@@ -179,3 +179,15 @@ test_random_port_is_free() {
     assert_true is_port "$port" || fail "rand_port باید پورت معتبر بدهد"
     assert_false port_in_use "$port" || fail "rand_port نباید پورت اشغال بدهد"
 }
+
+test_atomic_write_guarantees_trailing_newline() {
+    # Regression: atomic_write saved content verbatim, and the caller passed
+    # "$(...)" output whose trailing newline is always stripped — so later
+    # `>>` appends glued onto the last key=value line and corrupted state.env.
+    local f; f="$(mktemp)"
+    atomic_write "$f" 600 "A=1"
+    echo "B=2" >> "$f"
+    local last; last="$(tail -1 "$f")"
+    rm -f "$f"
+    [[ "$last" == "B=2" ]] || fail "خط آخر نباید چسبیده باشد: ${last}"
+}

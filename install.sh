@@ -22,8 +22,15 @@
 set -Eeuo pipefail
 
 # --- locate ourselves --------------------------------------------------------
-VPN_SANAI_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-SCRIPT_DIR="$(cd "$(dirname "$VPN_SANAI_SELF")" && pwd)"
+_self="${BASH_SOURCE[0]:-}"
+if [[ -z "$_self" || "$_self" == /dev/fd/* || "$_self" == /proc/* ]]; then
+    VPN_SANAI_SELF="${_self:-stdin}"
+    SCRIPT_DIR=""
+else
+    VPN_SANAI_SELF="$(readlink -f "$_self" 2>/dev/null || echo "$_self")"
+    SCRIPT_DIR="$(cd "$(dirname "$VPN_SANAI_SELF")" && pwd)"
+fi
+unset _self
 export VPN_SANAI_SELF SCRIPT_DIR
 
 LIB_DIR="${SCRIPT_DIR}/lib"

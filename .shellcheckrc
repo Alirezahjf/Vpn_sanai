@@ -1,0 +1,17 @@
+# shellcheck configuration for vpn-sanai
+#
+# The project is split into libraries that are sourced by several entry points
+# (install.sh, scripts/*.sh). shellcheck analyses one file at a time, so every
+# variable that is defined in one module and consumed by another looks
+# "unused" (SC2034). That check is disabled project-wide; dead code is caught
+# during review instead.
+disable=SC2034
+
+# Sources are resolved at runtime through ${SCRIPT_DIR}/${LIB_DIR}, which
+# shellcheck cannot follow. Modules are always sourced with an explicit
+# `# shellcheck source=` directive next to the call.
+disable=SC1090
+disable=SC1091
+
+external-sources=true
+enable=quote-safe-variables,require-double-brackets

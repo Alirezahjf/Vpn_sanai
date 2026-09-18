@@ -344,7 +344,10 @@ bot_panel_ready() {
                 return 1
             }
         else
-            BOT_ERR="مشخصات ورود پنل در state ثبت نشده است"
+            local missing=""
+            [[ -z "${PANEL_USER:-}" ]] && missing+="PANEL_USER "
+            [[ -z "${PANEL_PASS:-}" ]] && missing+="PANEL_PASS "
+            BOT_ERR="مشخصات ورود پنل در state ناقص است (${missing}خالی/ناموجود) — بازماندهٔ نصب ناقص قبلی است؛ نصب‌کننده را یک بار دیگر اجرا کنید تا state ترمیم شود"
             return 1
         fi
     fi

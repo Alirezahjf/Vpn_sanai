@@ -104,6 +104,38 @@ bot_pairing_try() {
     return 0
 }
 
+# tg_normalize_admins <raw> -> space-separated numeric ids
+# Numeric tokens pass through; @username tokens resolve to the numeric id via
+# getChat (works once that user has dm'd the bot); anything else is dropped
+# with a warning. Guards against the classic "@myname stored where a numeric
+# id was expected" mistake — the notification would reach no one and every
+# /start would be denied.
+tg_normalize_admins() {
+    local raw="$1" token id out="" uname
+    while IFS= read -r token; do
+        [[ -n "$token" ]] || continue
+        if is_uint "$token"; then
+            out+=" $token"
+            continue
+        fi
+        uname="${token#@}"
+        if [[ "$uname" =~ ^[A-Za-z][A-Za-z0-9_]{3,31}$ ]]; then
+            if tg_call getChat "$(jq -nc --arg c "@${uname}" '{chat_id:$c}')" >/dev/null 2>&1; then
+                id="$(printf '%s' "$TG_RESPONSE" | jq -r '.result.id // empty')"
+                if [[ "$id" =~ ^-?[0-9]+$ ]]; then
+                    out+=" $id"
+                    log_info "«${token}» به شناسهٔ عددی ${id} تبدیل شد"
+                    continue
+                fi
+            fi
+            log_warn "تشخیص آیدی «${token}» ناموفق بود؛ کاربر ابتدا باید به ربات Start بزند (یا آیدی عددی او را بدهید) — رد شد"
+        else
+            log_warn "شناسهٔ مدیر «${token}» نامعتبر است — رد شد (آیدی عددی یا @username وارد کنید)"
+        fi
+    done < <(printf '%s\n' "$raw" | tr ',;' '  ' | tr -s ' ' '\n')
+    printf '%s' "${out# }"
+}
+
 # --- sessions -----------------------------------------------------------------
 
 bot_sess_file() { printf '%s/chat-%s.env' "$BOT_STATE_DIR" "$1"; }
@@ -363,7 +395,8 @@ bot_gate() {
     log_warn "پیام از کاربر ناشناس ${uid} (${name}): رد شد"
     bot_reply "$chat" "⛔️ <b>دسترسی ندارید</b>
 
-این ربات فقط برای مدیران سرور تنظیم شده است." >/dev/null 2>&1 || true
+این ربات فقط برای مدیران سرور تنظیم شده است.
+🆔 شناسهٔ عددی شما: <code>${uid}</code>" >/dev/null 2>&1 || true
     local marker="${BOT_STATE_DIR}/intruder-${uid}"
     if [[ ! -f "$marker" || -n "$(find "$marker" -mmin +60 2>/dev/null)" ]]; then
         mkdir -p "$BOT_STATE_DIR" 2>/dev/null || true

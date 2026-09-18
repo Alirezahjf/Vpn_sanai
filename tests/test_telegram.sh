@@ -708,3 +708,31 @@ test_it_no_install_reports_error() {
     it_sent_texts | grep -q "${ADMIN_ID}"
     it_stop
 }
+
+test_tg_normalize_admins() {
+    # Regression: a non-numeric admin id (e.g. "@username") used to be stored
+    # verbatim — notifications silently failed and every /start was denied.
+    local out
+    out="$(tg_normalize_admins "111, 222 333" 2>/dev/null)"
+    [[ "$out" == "111 222 333" ]] || { echo "numeric list -> '$out'"; return 1; }
+    out="$(tg_normalize_admins "111 abc 222" 2>/dev/null)"
+    [[ "$out" == "111 222" ]] || { echo "garbage not dropped -> '$out'"; return 1; }
+    out="$(tg_normalize_admins " , ; " 2>/dev/null)"
+    [[ -z "$out" ]] || { echo "empty expected, got '$out'"; return 1; }
+}
+
+test_bot_gate_denial_shows_uid() {
+    # Regression aid: the denial message must echo the sender's numeric id so
+    # a mistyped TG_ADMIN_IDS can be fixed without guesswork.
+    BOT_STATE_DIR="$(mktemp -d)"
+    local sent=""
+    # shellcheck disable=SC2329
+    bot_reply() { sent="$2"; return 0; }
+    # shellcheck disable=SC2329
+    bot_pairing_try() { return 1; }
+    # shellcheck disable=SC2329
+    bot_notify_admins() { return 0; }
+    TG_ADMIN_IDS="999" TG_PAIRING_CODE="" bot_gate "111" "12345678" "نام" "/start" || true
+    rm -rf "$BOT_STATE_DIR"
+    [[ "$sent" == *"دسترسی ندارید"* && "$sent" == *"12345678"* ]] || { echo "reply='$sent'"; return 1; }
+}

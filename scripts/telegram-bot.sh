@@ -171,6 +171,12 @@ action_setup() {
     else
         admins="$(printf '%s' "$admins" | tr ',;' '  ' | tr -s ' ')"
     fi
+    # Validate/resolve before persisting: a non-numeric or unresolved admin id
+    # leaves the bot installed but unusable for its owner.
+    admins="$(tg_normalize_admins "$admins")"
+    if [[ -z "$admins" && -z "$pair" ]]; then
+        die "هیچ شناسهٔ مدیر معتبری باقی نماند. دوباره اجرا کنید و آیدی عددی (عددِ @userinfobot) یا @username کاربری که به ربات Start زده وارد کنید"
+    fi
 
     local autodel="$TG_AUTO_DELETE_DEFAULT" daily="yes" hour="$TG_DAILY_REPORT_HOUR_DEFAULT"
     if ((!VPN_SANAI_NONINTERACTIVE)); then

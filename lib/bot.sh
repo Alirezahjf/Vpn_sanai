@@ -82,7 +82,7 @@ bot_add_admin() {
     tmp="$(mktemp)"
     {
         grep -v '^TG_ADMIN_IDS=' "$VPN_SANAI_TG_CONFIG" 2>/dev/null || true
-        printf 'TG_ADMIN_IDS=%s %s\n' "${TG_ADMIN_IDS}" "$uid"
+        printf 'TG_ADMIN_IDS=%q\n' "${TG_ADMIN_IDS} ${uid}"
     } > "$tmp"
     cat "$tmp" > "$VPN_SANAI_TG_CONFIG" && rm -f "$tmp"
     chmod 600 "$VPN_SANAI_TG_CONFIG" 2>/dev/null || true

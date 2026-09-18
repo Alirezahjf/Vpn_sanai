@@ -450,6 +450,9 @@ read_env_value() {
             ;;
         \"*\") val="${val#\"}"; val="${val%\"}" ;;
         \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        *\\*)  # %q-escaped (e.g. a space-separated id list written by printf %q)
+            val="${val//\\ / }"
+            ;;
     esac
     printf '%s' "$val"
 }

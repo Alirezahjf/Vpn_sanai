@@ -117,7 +117,8 @@ test_bot_add_admin() {
     TG_ADMIN_IDS="$ADMIN_ID"
     bot_add_admin 777
     bot_is_admin 777 || return 1
-    grep -q '^TG_ADMIN_IDS=424242 777$' "${dir}/telegram.env"
+    ( unset TG_ADMIN_IDS 2>/dev/null || true; . "${dir}/telegram.env"
+      [[ "${TG_ADMIN_IDS:-}" == "424242 777" ]] ) || { echo "file not source-safe"; return 1; }
     # idempotent
     bot_add_admin 777
     ! grep -q '777 777' "${dir}/telegram.env"
@@ -752,4 +753,40 @@ test_bot_gate_refreshes_admins_from_disk() {
         bot_gate "111" "167514573" "mr_hjf" "/start" >/dev/null || rc=$?
     rm -rf "$tmp"
     [[ "$rc" == "0" ]] || { echo "disk admins ignored (rc=$rc)"; return 1; }
+}
+
+test_setup_writer_quotes_multi_token_values() {
+    # Regression: tg_setup_write_config stored `TG_ADMIN_IDS=111 222` bare; on
+    # source, bash parsed `222` as a command ("line N: 222: command not
+    # found") and the whole variable vanished — every admin got locked out.
+    grep -q 'TG_ADMIN_IDS=%q' "${TEST_DIR}/../scripts/telegram-bot.sh" \
+        || fail "نویسندهٔ کانفیگ باید مقدار چندبخشی را %q کوتیشن کند"
+}
+
+test_bot_add_admin_writes_source_safe_config() {
+    local tmp; tmp="$(mktemp -d)"
+    BOT_STATE_DIR="$tmp"
+    VPN_SANAI_TG_CONFIG="${tmp}/telegram.env"
+    printf 'TG_ADMIN_IDS=%q\n' "111" > "$VPN_SANAI_TG_CONFIG"
+    TG_ADMIN_IDS="111"
+    bot_add_admin "222" >/dev/null
+    local ok=1
+    ( unset TG_ADMIN_IDS 2>/dev/null || true; . "$VPN_SANAI_TG_CONFIG"
+      [[ "${TG_ADMIN_IDS:-}" == "111 222" ]] ) || ok=0
+    rm -rf "$tmp"
+    [[ "$ok" == "1" ]] || fail "پس از افزودن مدیر، فایل باید source-پذیر و هر دو مدیر حاضر باشند"
+}
+
+test_read_env_value_handles_escaped_and_legacy() {
+    local tmp; tmp="$(mktemp -d)"
+    local f="${tmp}/e.env"
+    # %q-written multi-token value (current writer)
+    printf 'TG_ADMIN_IDS=%q\n' "8837701608 167514573" > "$f"
+    [[ "$(read_env_value "$f" TG_ADMIN_IDS)" == "8837701608 167514573" ]] \
+        || { echo "q-encoded -> $(read_env_value "$f" TG_ADMIN_IDS)"; rm -rf "$tmp"; return 1; }
+    # legacy broken file (raw space, what older versions wrote)
+    printf 'TG_ADMIN_IDS=%s\n' "8837701608 167514573" > "$f"
+    [[ "$(read_env_value "$f" TG_ADMIN_IDS)" == "8837701608 167514573" ]] \
+        || { echo "legacy -> $(read_env_value "$f" TG_ADMIN_IDS)"; rm -rf "$tmp"; return 1; }
+    rm -rf "$tmp"
 }

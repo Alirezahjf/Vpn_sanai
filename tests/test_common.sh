@@ -168,7 +168,13 @@ PY
 
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
-    sleep 0.3
+    # CI sandboxes may mirror local listeners on another interface with
+    # SO_REUSEADDR and release them with ~1s delay — poll instead of a fixed
+    # sleep so the assertion stays meaningful everywhere.
+    for i in $(seq 1 50); do
+        port_in_use "$port" || break
+        sleep 0.1
+    done
     assert_false port_in_use "$port" || fail "پورت آزادشده نباید اشغال گزارش شود"
     rm -f "$port_file"
 }

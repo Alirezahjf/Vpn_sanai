@@ -1,0 +1,18 @@
+[Unit]
+Description=vpn-sanai Telegram management bot
+Documentation=https://github.com/Alirezahjf/Vpn_sanai
+After=network-online.target x-ui.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vpn-sanai-telegram --run
+Restart=on-failure
+RestartSec=5s
+Nice=5
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

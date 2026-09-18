@@ -49,7 +49,15 @@ case "$INIT_SYSTEM" in
     openrc)  rc-service x-ui stop 2>/dev/null || true ;;
 esac
 
-rm -f /usr/bin/x-ui /usr/local/bin/vpn-sanai /etc/systemd/system/x-ui.service 2>/dev/null || true
+# ربات تلگرام: سرویس پیش از حذف فایل‌هایش متوقف و غیرفعال می‌شود
+TG_UNIT="${VPN_SANAI_TG_UNIT_NAME:-vpn-sanai-telegram}"
+if has_cmd systemctl; then
+    systemctl stop "${TG_UNIT}" 2>/dev/null || true
+    systemctl disable "${TG_UNIT}" 2>/dev/null || true
+fi
+
+rm -f /usr/bin/x-ui /usr/local/bin/vpn-sanai /usr/local/bin/vpn-sanai-telegram \
+      /etc/systemd/system/x-ui.service "/etc/systemd/system/${TG_UNIT}.service" 2>/dev/null || true
 rm -rf /usr/local/x-ui 2>/dev/null || true
 rm -f /etc/cron.d/vpn-sanai-backup 2>/dev/null || true
 rm -f /etc/sysctl.d/99-vpn-sanai-bbr.conf /etc/sysctl.d/98-vpn-sanai-net.conf 2>/dev/null || true
@@ -78,6 +86,10 @@ if (( PURGE_ALL )) || ask_yesno "پوشهٔ state و لینک‌ها (${VPN_SANA
 fi
 if (( PURGE_ALL )) || ask_yesno "پشتیبان‌ها (${VPN_SANAI_BACKUP_DIR}) پاک شوند؟" "n"; then
     rm -rf "$VPN_SANAI_BACKUP_DIR"
+fi
+TG_STATE_DIR="${VPN_SANAI_BOT_STATE_DIR:-/var/lib/vpn-sanai/telegram}"
+if [[ -d "$TG_STATE_DIR" ]] && { (( PURGE_ALL )) || ask_yesno "وضعیت ربات تلگرام (${TG_STATE_DIR}) پاک شود؟" "n"; }; then
+    rm -rf "$TG_STATE_DIR"
 fi
 
 log_ok "حذف انجام شد. اگر UFW یا fail2ban را دستی نصب کرده‌اید، قواعد آن‌ها را بررسی کنید"

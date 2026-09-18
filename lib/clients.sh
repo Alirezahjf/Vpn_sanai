@@ -129,6 +129,77 @@ client_delete() {
     fi
 }
 
+# client_update <email> <client-json>
+#   The panel replaces the whole client row, so the caller must send the full
+#   payload (read it back with client_info, change fields, then call this).
+client_update() {
+    local email="$1" body="$2"
+    if api_silent POST "/panel/api/clients/update/$(url_encode "$email")" "$body"; then
+        log_ok "کلاینت «${email}» به‌روزرسانی شد"
+    else
+        log_error "به‌روزرسانی کلاینت «${email}» ناموفق بود: ${API_ERROR:-خطای نامشخص}"
+        return 1
+    fi
+}
+
+# client_set_enabled <email> <0|1> -> flips enable via the update endpoint
+client_set_enabled() {
+    local email="$1" enable="$2" info body
+    info="$(client_info "$email" 2>/dev/null)" || return 1
+    [[ -n "$info" ]] || return 1
+    body="$(printf '%s' "$info" | jq -c --argjson e "$enable" '(.client // .) | .enable=$e')" || return 1
+    client_update "$email" "$body"
+}
+
+# client_set_limits <email> [totalGB-bytes] [expiryTime-ms] [limitIp]
+#   Missing/empty arguments keep the current value.
+client_set_limits() {
+    local email="$1" total="${2:-}" expiry="${3:-}" limit_ip="${4:-}" info body
+    info="$(client_info "$email" 2>/dev/null)" || return 1
+    [[ -n "$info" ]] || return 1
+    body="$(printf '%s' "$info" | jq -c \
+        --argjson t "${total:-null}" --argjson e "${expiry:-null}" --argjson l "${limit_ip:-null}" \
+        '(.client // .)
+         | (if $t == null then . else .totalGB=$t end)
+         | (if $e == null then . else .expiryTime=$e end)
+         | (if $l == null then . else .limitIp=$l end)')" || return 1
+    client_update "$email" "$body"
+}
+
+# client_reset_traffic <email> -> zero the up/down counters of one client
+client_reset_traffic() {
+    local email="$1"
+    if api_silent POST "/panel/api/clients/resetTraffic/$(url_encode "$email")"; then
+        log_ok "ترافیک «${email}» صفر شد"
+    else
+        log_error "صفر کردن ترافیک «${email}» ناموفق بود: ${API_ERROR:-خطای نامشخص}"
+        return 1
+    fi
+}
+
+# client_reset_all_traffic -> zero the counters of every client
+client_reset_all_traffic() {
+    api_silent POST "/panel/api/clients/resetAllTraffics"
+}
+
+# client_delete_depleted -> remove finished (quota exhausted / expired) clients
+client_delete_depleted() {
+    api_silent POST "/panel/api/clients/delDepleted"
+}
+
+# client_onlines -> emails of the currently connected clients, one per line
+client_onlines() {
+    api_post_obj "/panel/api/clients/onlines" '{}' 2>/dev/null | jq -r '.[]? // empty' 2>/dev/null || true
+}
+
+# client_last_online <email> -> unix seconds or empty
+client_last_online() {
+    local email="$1" obj
+    obj="$(client_info "$email" 2>/dev/null)" || return 1
+    [[ -n "$obj" ]] || return 1
+    printf '%s' "$obj" | jq -r '(.lastOnline // .client.lastOnline // 0) / 1000 | floor' 2>/dev/null || true
+}
+
 # client_links_api <email> -> one URL per line (panel side view)
 client_links_api() {
     local email="$1" obj

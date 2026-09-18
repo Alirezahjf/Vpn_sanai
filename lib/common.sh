@@ -33,7 +33,7 @@ VPN_SANAI_VERSION="1.0.0"
 : "${VPN_SANAI_LIBEXEC:=/usr/local/lib/vpn-sanai}"
 
 XUI_MAIN_FOLDER_DEFAULT="/usr/local/x-ui"
-XUI_DB_DEFAULT="/etc/x-ui/x-ui.db"
+: "${XUI_DB_DEFAULT:=/etc/x-ui/x-ui.db}"
 XUI_INSTALL_RESULT="/etc/x-ui/install-result.env"
 XUI_SYSTEMD_UNIT="/etc/systemd/system/x-ui.service"
 XUI_CLI="/usr/bin/x-ui"

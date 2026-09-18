@@ -164,11 +164,13 @@ backup_cron_install() {
     [[ -n "$script" ]] || { log_warn "اسکریپت پشتیبان‌گیری پیدا نشد؛ cron نصب نشد"; return 0; }
 
     log_step "زمان‌بندی پشتیبان‌گیری روزانه (${cron_expr})"
+    # When the Telegram bot is configured, the daily result is also pushed to
+    # the admins (vpn-sanai-telegram exits 0 silently when unconfigured).
     atomic_write "$BACKUP_CRON_FILE" 644 "$(cat <<EOF
 # Managed by ${VPN_SANAI_NAME}
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-${cron_expr} root ${script} --quiet --prune
+${cron_expr} root ${script} --quiet --prune; rc=\$?; command -v vpn-sanai-telegram >/dev/null 2>&1 && vpn-sanai-telegram --notify "\$( [ \$rc -eq 0 ] && echo '💾 پشتیبان‌گیری روزانه با موفقیت انجام شد' || echo "❌ پشتیبان‌گیری روزانه ناموفق بود (کد \$rc)" )" || true
 EOF
 )"
     if has_cmd systemctl; then

@@ -235,12 +235,15 @@ panel_login() {
 
 # panel_detect_scheme -> probes loopback and sets PANEL_SCHEME
 panel_detect_scheme() {
-    local scheme
+    local scheme url code
     for scheme in https http; do
-        local code
+        url="${scheme}://127.0.0.1:${PANEL_PORT}${PANEL_BASE_PATH%/}/"
+        # NB: on failure curl STILL prints the -w value ("000"), so `|| echo 000`
+        # would yield "000\n000" and defeat the check below. Overwrite instead.
         code="$(curl -sk -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 6 \
-                "${scheme}://127.0.0.1:${PANEL_PORT}${PANEL_BASE_PATH%/}/" 2>/dev/null || echo 000)"
-        if [[ "$code" != "000" && -n "$code" ]]; then
+                "$url" 2>/dev/null)" || code="000"
+        # A completed request always yields a 3-digit code (even for HTTP errors).
+        if [[ "$code" =~ ^[0-9]{3}$ ]] && [[ "$code" != "000" ]]; then
             PANEL_SCHEME="$scheme"
             log_debug "پنل روی ${scheme} پاسخ می‌دهد (HTTP ${code})"
             return 0

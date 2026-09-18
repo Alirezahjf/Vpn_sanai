@@ -736,3 +736,20 @@ test_bot_gate_denial_shows_uid() {
     rm -rf "$BOT_STATE_DIR"
     [[ "$sent" == *"دسترسی ندارید"* && "$sent" == *"12345678"* ]] || { echo "reply='$sent'"; return 1; }
 }
+
+test_bot_gate_refreshes_admins_from_disk() {
+    # Regression: the running service caches TG_ADMIN_IDS from its start env;
+    # a manual edit of telegram.env used to be ignored until a restart, so
+    # legit admins stayed locked out (seen on a real server).
+    local tmp; tmp="$(mktemp -d)"
+    BOT_STATE_DIR="$tmp"
+    VPN_SANAI_TG_CONFIG="${tmp}/telegram.env"
+    printf 'TG_ADMIN_IDS=%s\n' "8837701608 167514573" > "$VPN_SANAI_TG_CONFIG"
+    # shellcheck disable=SC2329
+    bot_pairing_try() { return 1; }
+    local rc=0
+    TG_ADMIN_IDS="999" TG_PAIRING_CODE="" \
+        bot_gate "111" "167514573" "mr_hjf" "/start" >/dev/null || rc=$?
+    rm -rf "$tmp"
+    [[ "$rc" == "0" ]] || { echo "disk admins ignored (rc=$rc)"; return 1; }
+}

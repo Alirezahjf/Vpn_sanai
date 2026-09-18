@@ -375,9 +375,22 @@ bot_handle_update() {
 
 # --- access gate ---------------------------------------------------------------------
 
+# bot_refresh_admins_from_disk -> re-read TG_ADMIN_IDS from the config file.
+# The service caches the env it started with; manual edits of telegram.env
+# (the obvious way to fix a mistyped admin id) otherwise require a restart
+# before they take effect.
+bot_refresh_admins_from_disk() {
+    [[ -r "$VPN_SANAI_TG_CONFIG" ]] || return 0
+    local v
+    v="$(read_env_value "$VPN_SANAI_TG_CONFIG" TG_ADMIN_IDS 2>/dev/null || true)"
+    [[ -n "$v" ]] && TG_ADMIN_IDS="$v"
+    return 0
+}
+
 # bot_gate <chat> <uid> <display-name> <text> -> 0 when the user may continue
 bot_gate() {
     local chat="$1" uid="$2" name="$3" text="${4:-}"
+    bot_refresh_admins_from_disk
     if bot_is_admin "$uid"; then
         return 0
     fi

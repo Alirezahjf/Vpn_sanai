@@ -111,3 +111,54 @@ test_print_client_link_writes_and_returns() {
     assert_true test -s "${VPN_SANAI_LINKS_DIR}/user1.txt" || fail "فایل لینک نوشته نشد"
     assert_contains "$(cat "${VPN_SANAI_LINKS_DIR}/user1.txt")" "vless://" "لینک ذخیره‌شده" || return 1
 }
+
+test_is_uuid_rejects_numeric_row_ids() {
+    # Regression: newer panels return a numeric client row-id; it leaked into
+    # links as vless://1@… and broke every client.
+    _is_uuid "11111111-2222-3333-4444-555555555555" || fail "uuid معتبر رد شد"
+    if _is_uuid "1" || _is_uuid "2" || _is_uuid "" || _is_uuid "not-a-uuid"; then
+        fail "شناسهٔ عددی باید رد شود"
+    fi
+}
+
+test_client_uuid_in_inbound_reads_membership() {
+    inbound_get_json() {
+        printf '%s' '{"settings":{"clients":[{"id":"aaaaaaaa-1111-2222-3333-444444444444","email":"user1"},{"id":"bbbbbbbb-1111-2222-3333-444444444444","email":"user2"}]}}'
+    }
+    assert_eq "aaaaaaaa-1111-2222-3333-444444444444" "$(client_uuid_in_inbound user1 9)" "uuid عضو" || return 1
+    assert_eq "" "$(client_uuid_in_inbound ghost 9)" "ناموجود باید خالی بدهد" || return 1
+}
+
+test_client_add_duplicate_member_keeps_panel_uuid() {
+    # Regression: rerun hit "email already in use"; the installer then printed a
+    # link with its own fresh uuid while xray served the older one.
+    api_silent() { API_ERROR="email already in use: user1"; return 1; }
+    inbound_get_json() {
+        printf '%s' '{"settings":{"clients":[{"id":"eeeeeeee-9999-8888-7777-666666666666","email":"user1"}]}}'
+    }
+    CLIENT_UUID_ACTUAL=""
+    client_add user1 9 0 0 0 "xtls-rprx-vision" "ffffffff-0000-1111-2222-333333333333" || { echo "client_add باید موفق شود"; return 1; }
+    assert_eq "eeeeeeee-9999-8888-7777-666666666666" "$CLIENT_UUID_ACTUAL" "UUID باید با پنل هماهنگ شود" || return 1
+}
+
+test_client_add_duplicate_recreates_via_delete_ladder() {
+    # Regression: panels without the attach endpoint left the client off the
+    # inbound entirely while links were still printed.
+    local add_calls=0
+    api_silent() { # verb path body
+        case "$2" in
+            */attach*) API_ERROR="404 page not found"; return 1 ;;
+            */del/*) return 0 ;;
+            */add)
+                add_calls=$((add_calls+1))
+                if ((add_calls == 1)); then API_ERROR="email already in use: user1"; return 1; fi
+                return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+    inbound_get_json() { printf '%s' '{"settings":{"clients":[]}}'; }
+    CLIENT_UUID_ACTUAL=""
+    client_add user1 9 0 0 0 "xtls-rprx-vision" "ffffffff-0000-1111-2222-333333333333" || { echo "client_add ladder باید موفق شود"; return 1; }
+    assert_eq "2" "$add_calls" "دو بار تلاش add" || return 1
+    assert_eq "ffffffff-0000-1111-2222-333333333333" "$CLIENT_UUID_ACTUAL" "UUID بازسازی" || return 1
+}

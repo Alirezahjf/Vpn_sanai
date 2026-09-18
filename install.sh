@@ -646,9 +646,20 @@ create_inbounds_and_clients() {
 
     # ---- default client on the TCP inbound
     local email="$DEFAULT_CLIENT_EMAIL"
+    CLIENT_UUID_ACTUAL=""
     if ! client_add "$email" "$tcp_id" "$DEFAULT_CLIENT_TOTAL_GB" "$DEFAULT_CLIENT_EXPIRY_DAYS" \
             "$DEFAULT_CLIENT_LIMIT_IP" "$VLESS_FLOW" "$VLESS_UUID"; then
-        log_warn "ساخت کلاینت پیش‌فرض ناموفق بود؛ لینک از Inbound ساخته می‌شود"
+        log_warn "ساخت کلاینت پیش‌فرض ناموفق بود؛ وضعیت عضویت روی Inbound بررسی می‌شود"
+    fi
+    # Links must carry the uuid xray actually serves: panels may rewrite ids,
+    # and duplicate-email paths can leave an older identity on the inbound.
+    local actual_uuid="${CLIENT_UUID_ACTUAL:-}"
+    [[ -z "$actual_uuid" ]] && actual_uuid="$(client_uuid_in_inbound "$email" "${tcp_id:-}" 2>/dev/null || true)"
+    if [[ -n "$actual_uuid" ]]; then
+        [[ "$actual_uuid" != "$VLESS_UUID" ]] && log_info "UUID کلاینت پیش‌فرض با مقدار پنل هماهنگ شد"
+        VLESS_UUID="$actual_uuid"
+    else
+        log_warn "کلاینت پیش‌فرض «${email}» روی Inbound ${tcp_id} نیست؛ با vpn-sanai-add-client دوباره بسازید"
     fi
 
     # Additional emails requested on the command line
@@ -990,13 +1001,17 @@ action_show_clients() {
         return 0
     fi
 
-    local e
+    local e show_inbound_id="${VLESS_INBOUND_ID:-$(state_get VLESS_INBOUND_ID)}"
     for e in "${emails[@]}"; do
         VLESS_UUID=""
+        # The inbound membership is the only uuid xray accepts; newer panels
+        # also return a numeric client row-id that must never go into a link.
+        VLESS_UUID="$(client_uuid_in_inbound "$e" "${show_inbound_id:-}" 2>/dev/null || true)"
         local info
         info="$(client_info "$e")" || true
-        if [[ -n "$info" ]]; then
+        if [[ -z "$VLESS_UUID" && -n "$info" ]]; then
             VLESS_UUID="$(printf '%s' "$info" | jq -r '.client.id // .id // empty')"
+            _is_uuid "$VLESS_UUID" || VLESS_UUID=""
         fi
         [[ -n "$VLESS_UUID" ]] || VLESS_UUID="$(state_get VLESS_UUID)"
         VLESS_PORT="${VLESS_PORT:-$(state_get VLESS_PORT)}"

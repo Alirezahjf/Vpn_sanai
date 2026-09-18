@@ -101,16 +101,42 @@ client_add() {
 
     if api_silent POST "/panel/api/clients/add" "$body"; then
         log_ok "کلاینت «${email}» ساخته و به Inbound ${inbound_id} متصل شد"
+        [[ -n "$uuid" ]] && CLIENT_UUID_ACTUAL="$uuid"
         return 0
     fi
 
-    # Already present? attach it to the inbound instead of failing.
-    if printf '%s' "${API_ERROR:-}" | grep -qiE 'exist|duplicate|تکراری'; then
+    # Duplicate email (some panel versions enforce uniqueness panel-wide). If
+    # the client is already a member of THIS inbound there is nothing to do,
+    # but remember its actual uuid so printed links stay truthful.
+    # Match the real-world wordings: "email already in use" (3x-ui), "exists",
+    # "duplicate"… The plain "exist|duplicate" pattern used to miss the first
+    # one and the whole recovery ladder below never ran.
+    if printf '%s' "${API_ERROR:-}" | grep -qiE 'exist|duplicate|in use|تکراری'; then
+        local member_uuid
+        member_uuid="$(client_uuid_in_inbound "$email" "$inbound_id" 2>/dev/null || true)"
+        if [[ -n "$member_uuid" ]]; then
+            CLIENT_UUID_ACTUAL="$member_uuid"
+            log_info "کلاینت «${email}» از قبل عضو Inbound ${inbound_id} است"
+            if [[ -n "$uuid" && "$member_uuid" != "$uuid" ]]; then
+                log_warn "UUID «${email}» با مقدار درخواست‌شده متفاوت است؛ لینک با مقدار پنل ساخته می‌شود"
+            fi
+            return 0
+        fi
         log_warn "کلاینت «${email}» از قبل وجود دارد؛ به Inbound ${inbound_id} متصل می‌شود"
         local attach
         attach="$(jq -nc --argjson id "$inbound_id" '{inboundIds:[$id]}')"
         if api_silent POST "/panel/api/clients/$(url_encode "$email")/attach" "$attach"; then
             log_ok "کلاینت «${email}» به Inbound ${inbound_id} متصل شد"
+            return 0
+        fi
+        # Panels without an attach endpoint: drop the stale record and recreate
+        # it bound to this inbound, otherwise printed links point at a client
+        # xray does not serve.
+        log_warn "اتصال پشتیبانی نشد؛ رکورد قدیمی «${email}» حذف و دوباره ساخته می‌شود"
+        client_delete "$email" >/dev/null 2>&1 || true
+        if api_silent POST "/panel/api/clients/add" "$body"; then
+            log_ok "کلاینت «${email}» ساخته و به Inbound ${inbound_id} متصل شد"
+            [[ -n "$uuid" ]] && CLIENT_UUID_ACTUAL="$uuid"
             return 0
         fi
     fi
@@ -214,6 +240,23 @@ client_info() {
     api_get_obj "/panel/api/clients/get/$(url_encode "$email")" 2>/dev/null || true
 }
 
+# The VLESS/REALITY uuid is what xray authenticates with. Newer panels keep a
+# separate numeric row-id on the global client record — that must never end up
+# in a link (observed live: links printed as vless://1@… and vless://2@…).
+_is_uuid() {
+    [[ "${1:-}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
+
+# client_uuid_in_inbound <email> <inbound-id> -> the member uuid, empty when the
+# email is not attached to that inbound. This is the authoritative source for
+# links because xray authenticates against the inbound's settings.
+client_uuid_in_inbound() {
+    local email="$1" inbound_id="$2"
+    [[ -n "$email" && -n "$inbound_id" ]] || return 1
+    inbound_get_json "$inbound_id" 2>/dev/null | jq -r --arg e "$email" \
+        '.settings.clients[]? | select(.email == $e) | .id' 2>/dev/null | head -1
+}
+
 client_sub_id() {
     local email="$1"
     local info
@@ -274,16 +317,32 @@ print_client_link() {
     local email="$1"
     local link sub uuid info
     # Every client carries its own UUID; read it back so the QR we print can
-    # never point at a stale identity.
-    info="$(client_info "$email" 2>/dev/null || true)"
-    if [[ -n "$info" ]]; then
-        uuid="$(printf '%s' "$info" | jq -r '.client.id // .id // empty' 2>/dev/null || true)"
+    # never point at a stale identity. The authoritative source is the inbound
+    # membership (xray authenticates against it). Newer panels expose a numeric
+    # row-id on the global client record — never put that in a link.
+    local inbound_id="${VLESS_INBOUND_ID:-$(state_get VLESS_INBOUND_ID 2>/dev/null || true)}"
+    uuid="$(client_uuid_in_inbound "$email" "${inbound_id:-}" 2>/dev/null || true)"
+    if [[ -z "$uuid" ]]; then
+        info="$(client_info "$email" 2>/dev/null || true)"
+        if [[ -n "$info" ]]; then
+            uuid="$(printf '%s' "$info" | jq -r '.client.id // .id // empty' 2>/dev/null || true)"
+            _is_uuid "${uuid:-}" || uuid=""
+        fi
     fi
-    link="$(build_client_link_from_state "$email" "${uuid:-}" || true)"
     sub="$(client_sub_id "$email" 2>/dev/null || true)"
 
+    link=""
+    if [[ -n "$uuid" ]]; then
+        link="$(build_client_link_from_state "$email" "$uuid" || true)"
+    elif [[ "$email" == "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" \
+            || -z "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" ]]; then
+        # Offline-safe fallback only for the installer-managed default client;
+        # for any other email it would smuggle that client's uuid into the link.
+        link="$(build_client_link_from_state "$email" "" || true)"
+    fi
+
     if [[ -z "$link" ]]; then
-        log_warn "لینک محلی ساخته نشد؛ سراغ API پنل می‌روم"
+        log_warn "لینک محلی قابل‌اطمینان ساخته نشد (کلاینت عضو Inbound فعلی نیست؟)؛ سراغ API پنل می‌روم"
         link="$(client_links_api "$email" | head -1 || true)"
     fi
     [[ -n "$link" ]] || { log_error "لینکی برای ${email} پیدا نشد"; return 1; }

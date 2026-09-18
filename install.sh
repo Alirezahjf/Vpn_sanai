@@ -43,15 +43,21 @@ if [[ -f "${LIB_DIR}/bootstrap.sh" ]]; then
     source "${LIB_DIR}/bootstrap.sh"
 elif [[ ! -f "${LIB_DIR}/common.sh" ]]; then
     # Bare install.sh without the bootstrap module: fetch that one file from a
-    # mirror and let it download the rest of the tree.
-    printf '[vpn-sanai] فایل‌های پروژه پیدا نشد؛ از GitHub دانلود می‌شوند...\n' >&2
+    # mirror and let it download the rest of the tree. When piped through stdin
+    # install.sh cannot know which ref it was fetched from, so honour the same
+    # overrides the bootstrap module uses (default stays main).
+    VPN_SANAI_REPO="${VPN_SANAI_REPO:-Alirezahjf/Vpn_sanai}"
+    VPN_SANAI_REF="${VPN_SANAI_REF:-main}"
+    export VPN_SANAI_REPO VPN_SANAI_REF
+    printf '[vpn-sanai] فایل‌های پروژه پیدا نشد؛ از GitHub دانلود می‌شوند (repo=%s ref=%s)...\n' \
+        "$VPN_SANAI_REPO" "$VPN_SANAI_REF" >&2
     _tmpdir="$(mktemp -d /tmp/vpn-sanai-bootstrap.XXXXXX)"
     _ok=0
     for _url in \
-        "https://raw.githubusercontent.com/Alirezahjf/Vpn_sanai/main/lib/bootstrap.sh" \
-        "https://cdn.jsdelivr.net/gh/Alirezahjf/Vpn_sanai@main/lib/bootstrap.sh" \
-        "https://gcore.jsdelivr.net/gh/Alirezahjf/Vpn_sanai@main/lib/bootstrap.sh" \
-        "https://ghproxy.net/https://raw.githubusercontent.com/Alirezahjf/Vpn_sanai/main/lib/bootstrap.sh"; do
+        "https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh" \
+        "https://cdn.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh" \
+        "https://gcore.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh" \
+        "https://ghproxy.net/https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh"; do
         if curl -fsSL --connect-timeout 15 --retry 2 --max-time 60 \
                 -o "${_tmpdir}/bootstrap.sh" "$_url" 2>/dev/null && [[ -s "${_tmpdir}/bootstrap.sh" ]]; then
             _ok=1

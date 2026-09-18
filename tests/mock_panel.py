@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,11 +37,24 @@ PROTOCOLS = {
     "mixed", "tunnel", "tun", "mtproto", "amneziawg", "tuic",
 }
 
+LISTENERS: set = set()
+
 STATE: dict = {
     "inbounds": {},      # id -> inbound dict
     "clients": {},       # email -> client dict
     "next_id": 1,
     "requests": [],
+    "settings": {
+        "webPort": 2053,
+        "webPath": "/secret/",
+        "webListen": "",
+        "sessionMaxAge": 60,
+        "username": os.environ.get("MOCK_PANEL_USER", "admin"),
+        "password": os.environ.get("MOCK_PANEL_PASS", "admin"),
+        "subEnable": True,
+        "subPort": 2096,
+        "subPath": "/sub/",
+    },
 }
 
 
@@ -58,6 +72,18 @@ def as_obj(value):
         except json.JSONDecodeError:
             return {}
     return value
+
+
+def maybe_listen(port: int):
+    """Serve on an extra port (used when settings.webPort changes + panel restarts)."""
+    if not port or port in LISTENERS:
+        return
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError:
+        return
+    LISTENERS.add(port)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -163,7 +189,16 @@ class Handler(BaseHTTPRequestHandler):
                 body_json = None
 
         if path == "/panel/api/server/status":
-            return envelope(True, "ok", {"xray": {"state": "running", "version": "25.3.6"}}), 200
+            return envelope(True, "ok", {
+                "xray": {"state": "running", "version": "25.3.6", "error": ""},
+                "cpu": 7,
+                "uptime": 86400,
+                "loads": [0.10, 0.20, 0.30],
+                "mem": {"current": 2 * 1024 ** 3, "total": 4 * 1024 ** 3},
+                "swap": {"current": 0, "total": 0},
+                "disk": {"current": 10 * 1024 ** 3, "total": 40 * 1024 ** 3},
+                "appStats": {"inbounds": len(STATE["inbounds"]), "users": len(STATE["clients"])},
+            }), 200
 
         if path == "/panel/api/server/getNewX25519Cert":
             return envelope(True, "ok", {
@@ -213,12 +248,63 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/panel/api/clients/add":
             return self._add_client(body_json)
 
+        if path.startswith("/panel/api/clients/update/"):
+            email = unquote(path.rsplit("/", 1)[-1])
+            if email not in STATE["clients"]:
+                return envelope(False, "client not found", None), 200
+            if not isinstance(body_json, dict):
+                return envelope(False, "request body failed validation",
+                                {"issues": ["body must be a JSON object"]}), 200
+            # The real panel replaces the whole row and propagates the change
+            # into every attached inbound.
+            updated = dict(body_json)
+            updated["email"] = email
+            inbound_ids = STATE["clients"][email].get("inboundIds", [])
+            updated["inboundIds"] = inbound_ids
+            STATE["clients"][email] = updated
+            return envelope(True, "Client updated", None), 200
+
+        if path.startswith("/panel/api/clients/resetTraffic/"):
+            email = unquote(path.rsplit("/", 1)[-1])
+            client = STATE["clients"].get(email)
+            if not client:
+                return envelope(False, "client not found", None), 200
+            client["up"] = 0
+            client["down"] = 0
+            return envelope(True, "ok", None), 200
+
+        if path == "/panel/api/clients/resetAllTraffics":
+            for client in STATE["clients"].values():
+                client["up"] = 0
+                client["down"] = 0
+            return envelope(True, "ok", None), 200
+
+        if path == "/panel/api/clients/delDepleted":
+            deleted = 0
+            for email, client in list(STATE["clients"].items()):
+                total = client.get("totalGB", client.get("total", 0)) or 0
+                used = (client.get("up", 0) or 0) + (client.get("down", 0) or 0)
+                expired = (client.get("expiryTime", 0) or 0) > 0 and \
+                    client["expiryTime"] < 4102444800000  # ~2100-01-01 in ms
+                if (total > 0 and used >= total) or expired:
+                    del STATE["clients"][email]
+                    deleted += 1
+            return envelope(True, "ok", {"deleted": deleted}), 200
+
+        if path == "/panel/api/clients/onlines":
+            # The first created client is considered connected.
+            online = list(STATE["clients"])[:1]
+            return envelope(True, "ok", online), 200
+
         if path.startswith("/panel/api/clients/get/"):
             email = unquote(path.rsplit("/", 1)[-1])
             client = STATE["clients"].get(email)
             if not client:
                 return envelope(False, "client not found", None), 200
-            return envelope(True, "ok", {"client": client}), 200
+            # The real panel merges the client row with its traffic record.
+            merged = dict(client)
+            merged["client"] = dict(client)
+            return envelope(True, "ok", merged), 200
 
         if path.startswith("/panel/api/clients/links/"):
             email = unquote(path.rsplit("/", 1)[-1])
@@ -245,6 +331,37 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/panel/api/clients/list":
             return envelope(True, "ok", list(STATE["clients"].values())), 200
+
+        # --- panel settings (docs.sanaei.dev /panel/api/setting/*) -----------
+        if path == "/panel/api/setting/all":
+            return envelope(True, "ok", dict(STATE["settings"])), 200
+
+        if path == "/panel/api/setting/update":
+            if not isinstance(body_json, dict):
+                return envelope(False, "request body failed validation",
+                                {"issues": ["body must be a JSON object"]}), 200
+            # Mirror the real panel: full replace of every provided key, then
+            # validate a few critical ones.
+            for key, value in body_json.items():
+                STATE["settings"][key] = value
+            port = STATE["settings"].get("webPort")
+            if not isinstance(port, int) or not 1 <= port <= 65535:
+                return envelope(False, "webPort must be between 1 and 65535", None), 200
+            return envelope(True, "ok", None), 200
+
+        if path == "/panel/api/setting/updateUser":
+            s = STATE["settings"]
+            if body_json.get("oldUsername") != s.get("username") or \
+               body_json.get("oldPassword") != s.get("password"):
+                return envelope(False, "current credentials are incorrect", None), 200
+            s["username"] = body_json.get("newUsername", s["username"])
+            s["password"] = body_json.get("newPassword", s["password"])
+            return envelope(True, "ok", None), 200
+
+        if path == "/panel/api/setting/restartPanel":
+            # a real panel comes back on the (possibly new) webPort
+            maybe_listen(int(STATE["settings"].get("webPort", 0) or 0))
+            return envelope(True, "ok", None), 200
 
         return envelope(False, f"no mock route for {path}", None), 200
 
@@ -339,6 +456,13 @@ class Handler(BaseHTTPRequestHandler):
 
         client.setdefault("id", f"uuid-{len(STATE['clients']) + 1}")
         client.setdefault("subId", f"sub{len(STATE['clients']) + 1:08d}")
+        # Traffic record defaults (merged into the client row by /clients/get).
+        client.setdefault("enable", True)
+        client.setdefault("up", 0)
+        client.setdefault("down", 0)
+        client.setdefault("total", client.get("totalGB", 0))
+        client.setdefault("expiryTime", 0)
+        client.setdefault("lastOnline", 0)
         client["inboundIds"] = inbound_ids
         STATE["clients"][email] = client
 
@@ -350,6 +474,14 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- HTTP verbs --------------------------------------------------------
     def do_GET(self):  # noqa: N802
+        # GET /csrf-token is reachable under whatever base path is currently
+        # configured, which is how vpn-sanai probes a freshly changed webPath.
+        parsed = urlparse(self.path)
+        if re.search(r"/csrf-token/?$", parsed.path):
+            self._send(envelope(True, "ok", self.csrf_token),
+                       headers={"Set-Cookie": f"3x-ui={self.session_id}; Path={self.base_path}"})
+            self._record("GET", self._strip_base(parsed.path), b"", 200)
+            return
         self._route("GET")
 
     def do_POST(self):  # noqa: N802

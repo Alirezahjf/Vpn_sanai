@@ -332,6 +332,86 @@ xray_restart() {
     fi
 }
 
+# --- panel settings through the HTTP API -------------------------------------
+# /panel/api/setting/* (see docs.sanaei.dev): `all` returns the whole settings
+# blob the Settings page edits, `update` persists it back (full replace, so
+# always merge into the object returned by `all`), `updateUser` rotates the
+# admin credentials and `restartPanel` restarts the 3x-ui process.
+
+panel_settings_all() {
+    api_post_obj "/panel/api/setting/all" '{}'
+}
+
+# panel_settings_patch <jq-filter> [jq-args...] -> read all, patch, POST back
+#   Prints the patched object. Example:
+#       panel_settings_patch '.webPort = $port' --argjson port 2053
+panel_settings_patch() {
+    local filter="$1"; shift
+    local all patched
+    all="$(panel_settings_all)" || return 1
+    patched="$(printf '%s' "$all" | jq -c "$filter" "$@")" || return 1
+    if ! api_silent POST "/panel/api/setting/update" "$patched"; then
+        log_error "ذخیرهٔ تنظیمات پنل ناموفق بود: ${API_ERROR:-خطای نامشخص}"
+        return 1
+    fi
+    printf '%s' "$patched"
+}
+
+# panel_update_user <old-user> <old-pass> <new-user> <new-pass>
+panel_update_user() {
+    local old_user="$1" old_pass="$2" new_user="$3" new_pass="$4"
+    local body
+    body="$(jq -nc --arg ou "$old_user" --arg op "$old_pass" \
+                      --arg nu "$new_user" --arg np "$new_pass" \
+        '{oldUsername: $ou, oldPassword: $op, newUsername: $nu, newPassword: $np}')" || return 1
+    if ! api_silent POST "/panel/api/setting/updateUser" "$body"; then
+        log_error "تغییر مشخصات ورود پنل ناموفق بود: ${API_ERROR:-خطای نامشخص}"
+        return 1
+    fi
+    log_ok "نام کاربری/رمز عبور پنل تغییر کرد"
+}
+
+# panel_restart_api -> restart the whole 3x-ui process (grace period ~3s)
+panel_restart_api() {
+    api_silent POST "/panel/api/setting/restartPanel"
+}
+
+# panel_wait_port <port> <timeout-seconds> -> poll loopback until the panel
+# answers on the (possibly new) port. PANEL_PORT is updated on success.
+panel_wait_port() {
+    local port="$1" timeout="${2:-45}" waited=0 saved_port="${PANEL_PORT:-}"
+    PANEL_PORT="$port"
+    while ((waited < timeout)); do
+        if api_is_authenticated 2>/dev/null; then
+            return 0
+        fi
+        sleep 3
+        ((waited += 3))
+    done
+    PANEL_PORT="$saved_port"
+    return 1
+}
+
+# panel_probe_base_path <port> <raw-path> -> find the base path form the panel
+# actually serves ("/abc/" vs "abc") by probing /csrf-token. Sets PANEL_BASE_PATH.
+panel_probe_base_path() {
+    local port="$1" raw="$2" candidate
+    local -a candidates=( "/${raw}/" "/${raw}" )
+    local saved_base="${PANEL_BASE_PATH:-/}"
+    for candidate in "${candidates[@]}"; do
+        PANEL_BASE_PATH="$candidate"
+        local code
+        code="$(curl -sk -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 6 \
+                "${PANEL_SCHEME:-http}://127.0.0.1:${port}${candidate%/}/csrf-token" 2>/dev/null || echo 000)"
+        if [[ "$code" != "000" && "$code" != "404" ]]; then
+            log_debug "base path «${candidate}» پاسخ داد (HTTP ${code})"
+            return 0
+        fi
+    done
+    PANEL_BASE_PATH="$saved_base"
+    return 1
+}
+
 panel_status_summary() {
     local obj state version
     obj="$(api_get_obj "/panel/api/server/status" 2>/dev/null || true)"

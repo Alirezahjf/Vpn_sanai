@@ -157,6 +157,9 @@ vpn-sanai — نصب‌کنندهٔ پنل 3x-ui + VLESS/REALITY
   --update-panel           به‌روزرسانی پنل به آخرین نسخه
   --uninstall              حذف کامل پنل و تنظیمات vpn-sanai
   --menu                   منوی مدیریت (پیش‌فرض وقتی نصب موجود است)
+  --telegram               راه‌اندازی ربات تلگرام (تنظیم و نصب سرویس)
+  --tg-token TOKEN         توکن ربات (برای --telegram)
+  --tg-admins IDS          شناسهٔ مدیران، جدا با کاما (برای --telegram)
 
 عمومی:
   -y, --yes                بدون پرسش (غیرتعاملی)
@@ -711,6 +714,11 @@ final_summary() {
     kv "لاگ نصب" "${VPN_SANAI_LOG_FILE:-$VPN_SANAI_LOG_DIR}"
     kv "پشتیبان‌ها" "$VPN_SANAI_BACKUP_DIR"
     printf '\n' >&2
+    if ! [[ -r "${VPN_SANAI_ETC}/telegram.env" ]]; then
+        log_info "💡 برای مدیریت کامل سرور از تلگرام:  bash install.sh --telegram"
+    else
+        log_info "🤖 ربات تلگرام فعال است:  vpn-sanai-telegram --status"
+    fi
     log_ok "همه‌چیز آماده است ✨"
 }
 
@@ -796,6 +804,7 @@ install_cli_wrapper() {
         [vpn-sanai-security]="scripts/security.sh"
         [vpn-sanai-status]="scripts/status.sh"
         [vpn-sanai-uninstall]="scripts/uninstall.sh"
+        [vpn-sanai-telegram]="scripts/telegram-bot.sh"
     )
     local name rel target
     for name in "${!commands[@]}"; do
@@ -978,7 +987,8 @@ action_menu() {
     print_rule "منوی مدیریت vpn-sanai"
     local choice=""
     local -a options=("نمایش وضعیت" "افزودن کلاینت" "نمایش لینک و QR" "پشتیبان‌گیری" \
-                      "نهایی‌سازی پورت SSH" "به‌روزرسانی پنل" "اجرای مجدد پیکربندی" "حذف نصب" "خروج")
+                      "نهایی‌سازی پورت SSH" "به‌روزرسانی پنل" "اجرای مجدد پیکربندی" \
+                      "تنظیم ربات تلگرام" "حذف نصب" "خروج")
     if ((VPN_SANAI_NONINTERACTIVE)) || [[ ! -t 0 ]]; then
         show_status
         return 0
@@ -996,9 +1006,25 @@ action_menu() {
         5) state_load; ssh_finalize ;;
         6) action_update_panel ;;
         7) do_full_install ;;
-        8) action_uninstall ;;
+        8) action_telegram ;;
+        9) action_uninstall ;;
         *) log_info "خروج" ;;
     esac
+}
+
+# --- Telegram bot -------------------------------------------------------------
+action_telegram() {
+    local script="${SCRIPT_DIR}/scripts/telegram-bot.sh"
+    [[ -f "$script" ]] || script="${VPN_SANAI_LIBEXEC}/scripts/telegram-bot.sh"
+    [[ -f "$script" ]] || die "اسکریپت ربات تلگرام پیدا نشد (scripts/telegram-bot.sh)"
+
+    local -a args=(--setup)
+    [[ -n "${TG_SETUP_TOKEN:-}" ]] && args+=(--token "$TG_SETUP_TOKEN")
+    [[ -n "${TG_SETUP_ADMINS:-}" ]] && args+=(--admins "$TG_SETUP_ADMINS")
+    ((VPN_SANAI_NONINTERACTIVE)) && args+=(--yes)
+
+    log_step "راه‌اندازی ربات تلگرام"
+    exec bash "$script" "${args[@]}"
 }
 
 # --- main --------------------------------------------------------------------

@@ -28,14 +28,18 @@ _bootstrap_files=(
     "lib/clients.sh"
     "lib/security.sh"
     "lib/backup.sh"
+    "lib/telegram.sh"
+    "lib/bot.sh"
     "lib/load.sh"
     "config/defaults.conf"
+    "config/vpn-sanai-telegram.service"
     "scripts/add-client.sh"
     "scripts/show-clients.sh"
     "scripts/backup.sh"
     "scripts/security.sh"
     "scripts/status.sh"
     "scripts/uninstall.sh"
+    "scripts/telegram-bot.sh"
 )
 
 _bootstrap_urls_for() { # <relative-path> -> mirrors, one per line

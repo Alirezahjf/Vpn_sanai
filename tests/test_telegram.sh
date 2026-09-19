@@ -117,7 +117,8 @@ test_bot_add_admin() {
     TG_ADMIN_IDS="$ADMIN_ID"
     bot_add_admin 777
     bot_is_admin 777 || return 1
-    grep -q '^TG_ADMIN_IDS=424242 777$' "${dir}/telegram.env"
+    ( unset TG_ADMIN_IDS 2>/dev/null || true; . "${dir}/telegram.env"
+      [[ "${TG_ADMIN_IDS:-}" == "424242 777" ]] ) || { echo "file not source-safe"; return 1; }
     # idempotent
     bot_add_admin 777
     ! grep -q '777 777' "${dir}/telegram.env"
@@ -678,7 +679,9 @@ test_it_link_command() {
     it_feed_message "$ADMIN_ID" "/link ali"
     it_bot_run
     it_sent_texts | grep -q "vless://" || { it_stop; return 1; }
-    it_sent_texts | grep -q "203.0.113.9:443" || { it_stop; return 1; }
+    # The bot trusts the panel's own share link first (uuid/spiderX-exact);
+    # the mock panel serves panel.example.com for it.
+    it_sent_texts | grep -q "panel.example.com:443" || { it_stop; return 1; }
     # subscription link is included when the panel returns a subId
     it_sent_texts | grep -q "sub/"
     it_stop
@@ -707,4 +710,85 @@ test_it_no_install_reports_error() {
     it_bot_run
     it_sent_texts | grep -q "${ADMIN_ID}"
     it_stop
+}
+
+test_tg_normalize_admins() {
+    # Regression: a non-numeric admin id (e.g. "@username") used to be stored
+    # verbatim — notifications silently failed and every /start was denied.
+    local out
+    out="$(tg_normalize_admins "111, 222 333" 2>/dev/null)"
+    [[ "$out" == "111 222 333" ]] || { echo "numeric list -> '$out'"; return 1; }
+    out="$(tg_normalize_admins "111 abc 222" 2>/dev/null)"
+    [[ "$out" == "111 222" ]] || { echo "garbage not dropped -> '$out'"; return 1; }
+    out="$(tg_normalize_admins " , ; " 2>/dev/null)"
+    [[ -z "$out" ]] || { echo "empty expected, got '$out'"; return 1; }
+}
+
+test_bot_gate_denial_shows_uid() {
+    # Regression aid: the denial message must echo the sender's numeric id so
+    # a mistyped TG_ADMIN_IDS can be fixed without guesswork.
+    BOT_STATE_DIR="$(mktemp -d)"
+    local sent=""
+    # shellcheck disable=SC2329
+    bot_reply() { sent="$2"; return 0; }
+    # shellcheck disable=SC2329
+    bot_pairing_try() { return 1; }
+    # shellcheck disable=SC2329
+    bot_notify_admins() { return 0; }
+    TG_ADMIN_IDS="999" TG_PAIRING_CODE="" bot_gate "111" "12345678" "نام" "/start" || true
+    rm -rf "$BOT_STATE_DIR"
+    [[ "$sent" == *"دسترسی ندارید"* && "$sent" == *"12345678"* ]] || { echo "reply='$sent'"; return 1; }
+}
+
+test_bot_gate_refreshes_admins_from_disk() {
+    # Regression: the running service caches TG_ADMIN_IDS from its start env;
+    # a manual edit of telegram.env used to be ignored until a restart, so
+    # legit admins stayed locked out (seen on a real server).
+    local tmp; tmp="$(mktemp -d)"
+    BOT_STATE_DIR="$tmp"
+    VPN_SANAI_TG_CONFIG="${tmp}/telegram.env"
+    printf 'TG_ADMIN_IDS=%s\n' "8837701608 167514573" > "$VPN_SANAI_TG_CONFIG"
+    # shellcheck disable=SC2329
+    bot_pairing_try() { return 1; }
+    local rc=0
+    TG_ADMIN_IDS="999" TG_PAIRING_CODE="" \
+        bot_gate "111" "167514573" "mr_hjf" "/start" >/dev/null || rc=$?
+    rm -rf "$tmp"
+    [[ "$rc" == "0" ]] || { echo "disk admins ignored (rc=$rc)"; return 1; }
+}
+
+test_setup_writer_quotes_multi_token_values() {
+    # Regression: tg_setup_write_config stored `TG_ADMIN_IDS=111 222` bare; on
+    # source, bash parsed `222` as a command ("line N: 222: command not
+    # found") and the whole variable vanished — every admin got locked out.
+    grep -q 'TG_ADMIN_IDS=%q' "${TEST_DIR}/../scripts/telegram-bot.sh" \
+        || fail "نویسندهٔ کانفیگ باید مقدار چندبخشی را %q کوتیشن کند"
+}
+
+test_bot_add_admin_writes_source_safe_config() {
+    local tmp; tmp="$(mktemp -d)"
+    BOT_STATE_DIR="$tmp"
+    VPN_SANAI_TG_CONFIG="${tmp}/telegram.env"
+    printf 'TG_ADMIN_IDS=%q\n' "111" > "$VPN_SANAI_TG_CONFIG"
+    TG_ADMIN_IDS="111"
+    bot_add_admin "222" >/dev/null
+    local ok=1
+    ( unset TG_ADMIN_IDS 2>/dev/null || true; . "$VPN_SANAI_TG_CONFIG"
+      [[ "${TG_ADMIN_IDS:-}" == "111 222" ]] ) || ok=0
+    rm -rf "$tmp"
+    [[ "$ok" == "1" ]] || fail "پس از افزودن مدیر، فایل باید source-پذیر و هر دو مدیر حاضر باشند"
+}
+
+test_read_env_value_handles_escaped_and_legacy() {
+    local tmp; tmp="$(mktemp -d)"
+    local f="${tmp}/e.env"
+    # %q-written multi-token value (current writer)
+    printf 'TG_ADMIN_IDS=%q\n' "8837701608 167514573" > "$f"
+    [[ "$(read_env_value "$f" TG_ADMIN_IDS)" == "8837701608 167514573" ]] \
+        || { echo "q-encoded -> $(read_env_value "$f" TG_ADMIN_IDS)"; rm -rf "$tmp"; return 1; }
+    # legacy broken file (raw space, what older versions wrote)
+    printf 'TG_ADMIN_IDS=%s\n' "8837701608 167514573" > "$f"
+    [[ "$(read_env_value "$f" TG_ADMIN_IDS)" == "8837701608 167514573" ]] \
+        || { echo "legacy -> $(read_env_value "$f" TG_ADMIN_IDS)"; rm -rf "$tmp"; return 1; }
+    rm -rf "$tmp"
 }

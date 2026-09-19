@@ -168,7 +168,13 @@ PY
 
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
-    sleep 0.3
+    # CI sandboxes may mirror local listeners on another interface with
+    # SO_REUSEADDR and release them with ~1s delay — poll instead of a fixed
+    # sleep so the assertion stays meaningful everywhere.
+    for i in $(seq 1 50); do
+        port_in_use "$port" || break
+        sleep 0.1
+    done
     assert_false port_in_use "$port" || fail "پورت آزادشده نباید اشغال گزارش شود"
     rm -f "$port_file"
 }
@@ -178,4 +184,16 @@ test_random_port_is_free() {
     port="$(rand_port 20000 45000)"
     assert_true is_port "$port" || fail "rand_port باید پورت معتبر بدهد"
     assert_false port_in_use "$port" || fail "rand_port نباید پورت اشغال بدهد"
+}
+
+test_atomic_write_guarantees_trailing_newline() {
+    # Regression: atomic_write saved content verbatim, and the caller passed
+    # "$(...)" output whose trailing newline is always stripped — so later
+    # `>>` appends glued onto the last key=value line and corrupted state.env.
+    local f; f="$(mktemp)"
+    atomic_write "$f" 600 "A=1"
+    echo "B=2" >> "$f"
+    local last; last="$(tail -1 "$f")"
+    rm -f "$f"
+    [[ "$last" == "B=2" ]] || fail "خط آخر نباید چسبیده باشد: ${last}"
 }

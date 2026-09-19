@@ -421,6 +421,9 @@ atomic_write() {
     local dir tmp
     dir="$(dirname "$path")"
     mkdir -p "$dir" 2>/dev/null || true
+    # A trailing newline keeps later `>>` appends from gluing onto the last
+    # line (corrupting key=value files such as state.env).
+    [[ -n "$content" && "$content" != *$'\n' ]] && content+=$'\n'
 
     if ((VPN_SANAI_DRY_RUN)); then
         printf '%s[dry-run]%s write %s (%s)\n' "$C_YELLOW" "$C_RESET" "$path" "$mode" >&2
@@ -450,6 +453,9 @@ read_env_value() {
             ;;
         \"*\") val="${val#\"}"; val="${val%\"}" ;;
         \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        *\\*)  # %q-escaped (e.g. a space-separated id list written by printf %q)
+            val="${val//\\ / }"
+            ;;
     esac
     printf '%s' "$val"
 }

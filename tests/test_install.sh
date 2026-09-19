@@ -158,3 +158,108 @@ test_scripts_are_user_friendly() {
         assert_contains "$out" "Usage" "اسکریپت ${script} باید راهنما داشته باشد" || return 1
     done
 }
+
+test_reality_material_reaches_parent_shell() {
+    # Regression: create_inbounds_and_clients ran setup_reality_inbound in a
+    # command-substitution subshell, so the reality keypair / chosen SNI /
+    # shortId it resolved never reached the caller. The final report then
+    # crashed on ${VLESS_PUBLIC_KEY} under `set -u` (line ~678) and the
+    # persisted state / links came out empty. The fix harvests the inbound
+    # back into the parent shell right after creation.
+    (
+        set -Eeuo pipefail
+        VPN_SANAI_NO_MAIN=1
+        # shellcheck source=../install.sh
+        source "${TEST_DIR}/../install.sh"
+
+        # The real setup_reality_inbound stays under test; only the helpers
+        # that need a live panel/xray are stubbed.
+        reality_inbound_exists() { return 1; }
+        reality_keypair()        { printf 'PRIVKEY PUBKEY\n'; }
+        reality_short_id()       { printf 'sid123\n'; }
+        pick_reality_sni()       { printf 'example.com\n'; }
+        reality_build_payload()  { printf '{}'; }
+        reality_create_inbound() { printf '7\n'; }
+        inbound_set_share_addr() { :; }
+        choose_free_port()       { printf '8444\n'; }
+        client_add()             { :; }
+        xray_restart()           { :; }
+        port_in_use()            { return 0; }
+        inbound_get_json() {
+            cat <<'JSON'
+{"id":7,"remark":"test","settings":{"clients":[{"id":"11111111-2222-3333-4444-555555555555","flow":"xtls-rprx-vision","email":"user1"}]},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"serverNames":["example.com"],"shortIds":["sid123"],"privateKey":"PRIVKEY","settings":{"publicKey":"PUBKEY"}}}}
+JSON
+        }
+
+        unset VLESS_PUBLIC_KEY VLESS_PRIVATE_KEY VLESS_SNI VLESS_SHORT_ID \
+              VLESS_UUID VLESS_INBOUND_ID VLESS_REMARK 2>/dev/null || true
+        VLESS_PORT=1443 SERVER_IP=203.0.113.10 CREATE_XHTTP=yes \
+            DEFAULT_CLIENT_EMAIL=user1 DEFAULT_CLIENT_TOTAL_GB=0 \
+            DEFAULT_CLIENT_EXPIRY_DAYS=0 DEFAULT_CLIENT_LIMIT_IP=0 \
+            VLESS_SNI_CHOICE=""
+        create_inbounds_and_clients >/dev/null 2>&1
+
+        [[ "$VLESS_INBOUND_ID"  == "7" ]] || { echo "VLESS_INBOUND_ID='$VLESS_INBOUND_ID'"; return 1; }
+        [[ "$VLESS_PUBLIC_KEY"  == "PUBKEY" ]] || { echo "VLESS_PUBLIC_KEY='$VLESS_PUBLIC_KEY'"; return 1; }
+        [[ "$VLESS_PRIVATE_KEY" == "PRIVKEY" ]] || { echo "VLESS_PRIVATE_KEY='$VLESS_PRIVATE_KEY'"; return 1; }
+        [[ "$VLESS_SNI"         == "example.com" ]] || { echo "VLESS_SNI='$VLESS_SNI'"; return 1; }
+        [[ "$VLESS_SHORT_ID"    == "sid123" ]] || { echo "VLESS_SHORT_ID='$VLESS_SHORT_ID'"; return 1; }
+        [[ "$VLESS_UUID" == "11111111-2222-3333-4444-555555555555" ]] || { echo "VLESS_UUID='$VLESS_UUID'"; return 1; }
+        [[ -n "${XHTTP_INBOUND_ID:-}" ]] || { echo "XHTTP_INBOUND_ID empty"; return 1; }
+    ) || fail "کلیدها و SNI باید پس از ساخت Inbound در شل اصلی در دسترس باشند"
+}
+
+test_default_or_ask_resolves_named_default() {
+    # Regression: _default_or_ask received the NAME of a *_DEFAULT variable
+    # but used ${1:-} instead of ${!1}, so the literal string
+    # "PANEL_USER_DEFAULT" leaked into the panel's credentials and every
+    # report/summary.
+    (
+        set -Eeuo pipefail
+        VPN_SANAI_NO_MAIN=1
+        # shellcheck source=../install.sh
+        source "${TEST_DIR}/../install.sh"
+
+        SAMPLE_DEFAULT="file-value"
+        local out
+        out="$(_default_or_ask SAMPLE_DEFAULT "fallback" "برچسب")"
+        [[ "$out" == "file-value" ]] || { echo "named default -> '$out'"; return 1; }
+
+        EMPTY_DEFAULT=""
+        VPN_SANAI_NONINTERACTIVE=1
+        out="$(_default_or_ask EMPTY_DEFAULT "fallback" "برچسب")"
+        [[ "$out" == "fallback" ]] || { echo "empty default -> '$out'"; return 1; }
+        [[ "$out" != "EMPTY_DEFAULT" ]] || { echo "literal name leaked"; return 1; }
+    ) || fail "_default_or_ask باید مقدار متغیر نام‌برده را برگرداند، نه اسمش را"
+}
+
+test_panel_placeholder_secrets_healed() {
+    # Regression: servers installed by the buggy version carry the literal
+    # placeholder names in state and in the panel itself; the heal step must
+    # regenerate them (and flag creds/base so bootstrap re-applies them).
+    (
+        set -Eeuo pipefail
+        VPN_SANAI_NO_MAIN=1
+        # shellcheck source=../install.sh
+        source "${TEST_DIR}/../install.sh"
+
+        PANEL_USER="PANEL_USER_DEFAULT"
+        PANEL_PASS="PANEL_PASS_DEFAULT"
+        PANEL_BASE_PATH="/PANEL_BASE_PATH_DEFAULT/"
+        PANEL_BASE_PATH_RAW="PANEL_BASE_PATH_DEFAULT"
+        panel_heal_placeholder_secrets
+
+        [[ "$PANEL_USER" != "PANEL_USER_DEFAULT" && -n "$PANEL_USER" ]] || { echo "user='$PANEL_USER'"; return 1; }
+        [[ "$PANEL_PASS" != "PANEL_PASS_DEFAULT" && -n "$PANEL_PASS" ]] || { echo "pass='$PANEL_PASS'"; return 1; }
+        [[ "$PANEL_BASE_PATH" != "/PANEL_BASE_PATH_DEFAULT/" && "$PANEL_BASE_PATH" == /*/ ]] \
+            || { echo "base='$PANEL_BASE_PATH'"; return 1; }
+        ((PANEL_HEALED_CREDS == 1 && PANEL_HEALED_BASE == 1)) || { echo "flags not set"; return 1; }
+
+        # A healthy config must be left untouched.
+        PANEL_USER="real-user"; PANEL_PASS="real-pass"
+        PANEL_BASE_PATH="/abc123/"; PANEL_BASE_PATH_RAW="abc123"
+        panel_heal_placeholder_secrets
+        [[ "$PANEL_USER" == "real-user" && "$PANEL_PASS" == "real-pass" ]] || { echo "clobbered healthy values"; return 1; }
+        ((PANEL_HEALED_CREDS == 0 && PANEL_HEALED_BASE == 0)) || { echo "false positive heal"; return 1; }
+    ) || fail "مقادیر placeholder باید ترمیم و مقادیر سالم دست‌نخورده بمانند"
+}

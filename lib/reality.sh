@@ -236,10 +236,11 @@ reality_inbound_exists() {
     list="$(api_get_obj "/panel/api/inbounds/list" 2>/dev/null || true)"
     [[ -n "$list" ]] || return 1
     printf '%s' "$list" | jq -r --arg p "$port" --arg net "$network" '
+        def norm: if type == "string" then (fromjson? // {}) else (. // {}) end;
         .[]?
         | select(.protocol == "vless")
         | select((.port|tostring) == $p)
-        | select((.streamSettings | fromjson? | .network) == $net)
+        | select((.streamSettings | norm | .network) == $net)
         | .id' 2>/dev/null | head -1
 }
 
@@ -247,11 +248,12 @@ reality_inbound_exists() {
 inbound_get_json() {
     local id="$1"
     api_get_obj "/panel/api/inbounds/get/${id}" | jq -c '
+        def norm: if type == "string" then (fromjson? // {}) else (. // {}) end;
         . as $i
         | $i
-        + { settings: ($i.settings | fromjson? // {}),
-            streamSettings: ($i.streamSettings | fromjson? // {}),
-            sniffing: ($i.sniffing | fromjson? // {}) }'
+        + { settings: ($i.settings | norm),
+            streamSettings: ($i.streamSettings | norm),
+            sniffing: ($i.sniffing | norm) }'
 }
 
 # reality_harvest_from_inbound <inbound-json>
@@ -265,7 +267,10 @@ reality_harvest_from_inbound() {
     VLESS_SNI="${VLESS_SNI:-$(printf '%s' "$json" | jq -r '.streamSettings.realitySettings.serverNames[0] // empty')}"
     VLESS_SHORT_ID="${VLESS_SHORT_ID:-$(printf '%s' "$json" | jq -r '.streamSettings.realitySettings.shortIds[0] // empty')}"
     VLESS_PRIVATE_KEY="${VLESS_PRIVATE_KEY:-$(printf '%s' "$json" | jq -r '.streamSettings.realitySettings.privateKey // empty')}"
-    VLESS_PUBLIC_KEY="${VLESS_PUBLIC_KEY:-$(printf '%s' "$json" | jq -r '.streamSettings.realitySettings.settings.publicKey // empty')}"
+    # realitySettings.settings is an object in current panels, but tolerate
+    # builds that return it string-encoded.
+    VLESS_PUBLIC_KEY="${VLESS_PUBLIC_KEY:-$(printf '%s' "$json" | jq -r \
+        '.streamSettings.realitySettings.settings | if type == "string" then (fromjson? // {}) else (. // {}) end | .publicKey // empty')}"
 
     local first_uuid first_flow
     first_uuid="$(printf '%s' "$json" | jq -r '.settings.clients[0].id // empty')"

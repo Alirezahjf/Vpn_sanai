@@ -85,12 +85,16 @@ tg_setup_write_config() {
     local token="$1" admins="$2" autodel="$3" daily="$4" hour="$5"
     local pair="${6:-}" pair_exp="${7:-}"
     ensure_dir "$VPN_SANAI_ETC" 700
-    local content="# Managed by ${VPN_SANAI_NAME} (telegram bot) — mode 600
-TG_BOT_TOKEN=${token}
-TG_ADMIN_IDS=${admins}
-TG_AUTO_DELETE=${autodel}
-TG_DAILY_REPORT=${daily}
-TG_DAILY_REPORT_HOUR=${hour}"
+    # Values MUST be shell-quoted (%q): the file is sourced by bash, and an
+    # unquoted multi-token value (e.g. two admin ids separated by a space) is
+    # parsed as an assignment-prefix plus a command — "line N: <id>: command
+    # not found" — silently wiping the variable and locking everyone out.
+    printf -v content '%s\n' "# Managed by ${VPN_SANAI_NAME} (telegram bot) — mode 600"
+    printf -v content '%sTG_BOT_TOKEN=%q\n'        "$content" "$token"
+    printf -v content '%sTG_ADMIN_IDS=%q\n'        "$content" "$admins"
+    printf -v content '%sTG_AUTO_DELETE=%q\n'      "$content" "$autodel"
+    printf -v content '%sTG_DAILY_REPORT=%q\n'     "$content" "$daily"
+    printf -v content '%sTG_DAILY_REPORT_HOUR=%q'  "$content" "$hour"
     [[ -n "$pair" ]] && content+=$'\n'"TG_PAIRING_CODE=${pair}"$'\n'"TG_PAIRING_EXPIRY=${pair_exp}"
     atomic_write "$VPN_SANAI_TG_CONFIG" 600 "$content"
     chmod 600 "$VPN_SANAI_TG_CONFIG" 2>/dev/null || true
@@ -170,6 +174,12 @@ action_setup() {
         fi
     else
         admins="$(printf '%s' "$admins" | tr ',;' '  ' | tr -s ' ')"
+    fi
+    # Validate/resolve before persisting: a non-numeric or unresolved admin id
+    # leaves the bot installed but unusable for its owner.
+    admins="$(tg_normalize_admins "$admins")"
+    if [[ -z "$admins" && -z "$pair" ]]; then
+        die "هیچ شناسهٔ مدیر معتبری باقی نماند. دوباره اجرا کنید و آیدی عددی (عددِ @userinfobot) یا @username کاربری که به ربات Start زده وارد کنید"
     fi
 
     local autodel="$TG_AUTO_DELETE_DEFAULT" daily="yes" hour="$TG_DAILY_REPORT_HOUR_DEFAULT"

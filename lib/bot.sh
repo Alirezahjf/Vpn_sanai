@@ -82,7 +82,7 @@ bot_add_admin() {
     tmp="$(mktemp)"
     {
         grep -v '^TG_ADMIN_IDS=' "$VPN_SANAI_TG_CONFIG" 2>/dev/null || true
-        printf 'TG_ADMIN_IDS=%s %s\n' "${TG_ADMIN_IDS}" "$uid"
+        printf 'TG_ADMIN_IDS=%q\n' "${TG_ADMIN_IDS} ${uid}"
     } > "$tmp"
     cat "$tmp" > "$VPN_SANAI_TG_CONFIG" && rm -f "$tmp"
     chmod 600 "$VPN_SANAI_TG_CONFIG" 2>/dev/null || true
@@ -102,6 +102,38 @@ bot_pairing_try() {
     sed -i '/^TG_PAIRING_CODE=/d; /^TG_PAIRING_EXPIRY=/d' "$VPN_SANAI_TG_CONFIG" 2>/dev/null || true
     TG_PAIRING_CODE=""
     return 0
+}
+
+# tg_normalize_admins <raw> -> space-separated numeric ids
+# Numeric tokens pass through; @username tokens resolve to the numeric id via
+# getChat (works once that user has dm'd the bot); anything else is dropped
+# with a warning. Guards against the classic "@myname stored where a numeric
+# id was expected" mistake — the notification would reach no one and every
+# /start would be denied.
+tg_normalize_admins() {
+    local raw="$1" token id out="" uname
+    while IFS= read -r token; do
+        [[ -n "$token" ]] || continue
+        if is_uint "$token"; then
+            out+=" $token"
+            continue
+        fi
+        uname="${token#@}"
+        if [[ "$uname" =~ ^[A-Za-z][A-Za-z0-9_]{3,31}$ ]]; then
+            if tg_call getChat "$(jq -nc --arg c "@${uname}" '{chat_id:$c}')" >/dev/null 2>&1; then
+                id="$(printf '%s' "$TG_RESPONSE" | jq -r '.result.id // empty')"
+                if [[ "$id" =~ ^-?[0-9]+$ ]]; then
+                    out+=" $id"
+                    log_info "«${token}» به شناسهٔ عددی ${id} تبدیل شد"
+                    continue
+                fi
+            fi
+            log_warn "تشخیص آیدی «${token}» ناموفق بود؛ کاربر ابتدا باید به ربات Start بزند (یا آیدی عددی او را بدهید) — رد شد"
+        else
+            log_warn "شناسهٔ مدیر «${token}» نامعتبر است — رد شد (آیدی عددی یا @username وارد کنید)"
+        fi
+    done < <(printf '%s\n' "$raw" | tr ',;' '  ' | tr -s ' ' '\n')
+    printf '%s' "${out# }"
 }
 
 # --- sessions -----------------------------------------------------------------
@@ -312,7 +344,10 @@ bot_panel_ready() {
                 return 1
             }
         else
-            BOT_ERR="مشخصات ورود پنل در state ثبت نشده است"
+            local missing=""
+            [[ -z "${PANEL_USER:-}" ]] && missing+="PANEL_USER "
+            [[ -z "${PANEL_PASS:-}" ]] && missing+="PANEL_PASS "
+            BOT_ERR="مشخصات ورود پنل در state ناقص است (${missing}خالی/ناموجود) — بازماندهٔ نصب ناقص قبلی است؛ نصب‌کننده را یک بار دیگر اجرا کنید تا state ترمیم شود"
             return 1
         fi
     fi
@@ -343,9 +378,22 @@ bot_handle_update() {
 
 # --- access gate ---------------------------------------------------------------------
 
+# bot_refresh_admins_from_disk -> re-read TG_ADMIN_IDS from the config file.
+# The service caches the env it started with; manual edits of telegram.env
+# (the obvious way to fix a mistyped admin id) otherwise require a restart
+# before they take effect.
+bot_refresh_admins_from_disk() {
+    [[ -r "$VPN_SANAI_TG_CONFIG" ]] || return 0
+    local v
+    v="$(read_env_value "$VPN_SANAI_TG_CONFIG" TG_ADMIN_IDS 2>/dev/null || true)"
+    [[ -n "$v" ]] && TG_ADMIN_IDS="$v"
+    return 0
+}
+
 # bot_gate <chat> <uid> <display-name> <text> -> 0 when the user may continue
 bot_gate() {
     local chat="$1" uid="$2" name="$3" text="${4:-}"
+    bot_refresh_admins_from_disk
     if bot_is_admin "$uid"; then
         return 0
     fi
@@ -363,7 +411,8 @@ bot_gate() {
     log_warn "پیام از کاربر ناشناس ${uid} (${name}): رد شد"
     bot_reply "$chat" "⛔️ <b>دسترسی ندارید</b>
 
-این ربات فقط برای مدیران سرور تنظیم شده است." >/dev/null 2>&1 || true
+این ربات فقط برای مدیران سرور تنظیم شده است.
+🆔 شناسهٔ عددی شما: <code>${uid}</code>" >/dev/null 2>&1 || true
     local marker="${BOT_STATE_DIR}/intruder-${uid}"
     if [[ ! -f "$marker" || -n "$(find "$marker" -mmin +60 2>/dev/null)" ]]; then
         mkdir -p "$BOT_STATE_DIR" 2>/dev/null || true
@@ -1203,7 +1252,8 @@ bot_build_status_html() {
     local rows count
     rows="$(printf '%s' "$inbounds" | jq -r '
         .[]? | [.remark // .tag // (.id|tostring), (.port|tostring), .protocol,
-              (((.up // 0) + (.down // 0))), ((.settings|fromjson?).clients // [] | length)]
+              (((.up // 0) + (.down // 0))),
+              ((.settings | if type == "string" then fromjson? else . end).clients // [] | length)]
             | @tsv' 2>/dev/null || true)"
     if [[ -n "$rows" ]]; then
         text+=$'\n'"📡 <b>Inboundها</b>"
@@ -1244,13 +1294,15 @@ bot_render_status_edit() {
 bot_client_emails() {
     {
         client_list 2>/dev/null | jq -r '
+            def norm: if type == "string" then fromjson? else . end;
             if type=="array" and ((.[0]? // {}) | has("settings")) then
-                .[] | (.settings|fromjson?) | .clients[]? | .email
+                .[] | (.settings|norm) | .clients[]? | .email
             else
                 .[]? | (.email // .client.email // empty)
             end' 2>/dev/null || true
         api_get_obj "/panel/api/inbounds/list" 2>/dev/null | jq -r '
-            .[]? | (.settings|fromjson?) | .clients[]? | .email' 2>/dev/null || true
+            def norm: if type == "string" then fromjson? else . end;
+            .[]? | (.settings|norm) | .clients[]? | .email' 2>/dev/null || true
     } | grep -v '^$' | sort -u
 }
 
@@ -1383,13 +1435,25 @@ bot_action_client_qr() {
 # bot_send_client_link <chat> <email> -> link + QR photo + subscription
 bot_send_client_link() {
     local chat="$1" email="$2"
-    local info uuid link sub sub_id
-    info="$(client_info "$email" 2>/dev/null)" || true
-    if [[ -n "$info" ]]; then
-        uuid="$(printf '%s' "$info" | jq -r '(.client.id // .id // empty)' 2>/dev/null || true)"
+    local uuid link links sub sub_id extra=0
+    # Trust the panel's own share links first: they mirror the exact inbound
+    # (uuid, spiderX, port) xray actually serves. The bot used to send links
+    # built from state defaults — wrong uuid and spiderX on panels with
+    # numeric client row-ids or custom inbounds.
+    links="$(client_links_api "$email" 2>/dev/null | grep '^vless://' || true)"
+    if [[ -n "$links" ]]; then
+        link="$(printf '%s\n' "$links" | head -1)"
+        extra=$(( $(printf '%s\n' "$links" | grep -c '^vless://') - 1 ))
+    else
+        uuid="$(client_resolve_uuid "$email" 2>/dev/null || true)"
+        if [[ -n "$uuid" ]]; then
+            link="$(build_client_link_from_state "$email" "$uuid" 2>/dev/null || true)"
+        elif [[ "$email" == "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" \
+                || -z "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" ]]; then
+            # Offline-safe fallback only for the installer-managed default client.
+            link="$(build_client_link_from_state "$email" "" 2>/dev/null || true)"
+        fi
     fi
-    link="$(build_client_link_from_state "$email" "${uuid:-}" 2>/dev/null || true)"
-    [[ -n "$link" ]] || link="$(client_links_api "$email" 2>/dev/null | head -1 || true)"
     if [[ -z "$link" ]]; then
         bot_reply "$chat" "❌ لینک «$(tg_escape_html "$email")» ساخته نشد." >/dev/null
         return 0
@@ -1402,6 +1466,7 @@ bot_send_client_link() {
     text="🔗 <b>کانفیگ $(tg_escape_html "$email")</b>
 
 <code>$(tg_escape_html "$link")</code>"
+    (( extra > 0 )) && text+=$'\n'"➕ این اکانت روی ${extra} Inbound دیگر هم است؛ کانفیگ‌هایش را از لینک اشتراک یا پنل بردارید."
     [[ -n "$sub" ]] && text+=$'\n\n'"📎 <b>لینک اشتراک</b> (آپدیت خودکار):
 <code>$(tg_escape_html "$sub")</code>"
 

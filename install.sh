@@ -22,8 +22,15 @@
 set -Eeuo pipefail
 
 # --- locate ourselves --------------------------------------------------------
-VPN_SANAI_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-SCRIPT_DIR="$(cd "$(dirname "$VPN_SANAI_SELF")" && pwd)"
+_self="${BASH_SOURCE[0]:-}"
+if [[ -z "$_self" || "$_self" == /dev/fd/* || "$_self" == /proc/* ]]; then
+    VPN_SANAI_SELF="${_self:-stdin}"
+    SCRIPT_DIR=""
+else
+    VPN_SANAI_SELF="$(readlink -f "$_self" 2>/dev/null || echo "$_self")"
+    SCRIPT_DIR="$(cd "$(dirname "$VPN_SANAI_SELF")" && pwd)"
+fi
+unset _self
 export VPN_SANAI_SELF SCRIPT_DIR
 
 LIB_DIR="${SCRIPT_DIR}/lib"
@@ -36,15 +43,21 @@ if [[ -f "${LIB_DIR}/bootstrap.sh" ]]; then
     source "${LIB_DIR}/bootstrap.sh"
 elif [[ ! -f "${LIB_DIR}/common.sh" ]]; then
     # Bare install.sh without the bootstrap module: fetch that one file from a
-    # mirror and let it download the rest of the tree.
-    printf '[vpn-sanai] فایل‌های پروژه پیدا نشد؛ از GitHub دانلود می‌شوند...\n' >&2
+    # mirror and let it download the rest of the tree. When piped through stdin
+    # install.sh cannot know which ref it was fetched from, so honour the same
+    # overrides the bootstrap module uses (default stays main).
+    VPN_SANAI_REPO="${VPN_SANAI_REPO:-Alirezahjf/Vpn_sanai}"
+    VPN_SANAI_REF="${VPN_SANAI_REF:-main}"
+    export VPN_SANAI_REPO VPN_SANAI_REF
+    printf '[vpn-sanai] فایل‌های پروژه پیدا نشد؛ از GitHub دانلود می‌شوند (repo=%s ref=%s)...\n' \
+        "$VPN_SANAI_REPO" "$VPN_SANAI_REF" >&2
     _tmpdir="$(mktemp -d /tmp/vpn-sanai-bootstrap.XXXXXX)"
     _ok=0
     for _url in \
-        "https://raw.githubusercontent.com/Alirezahjf/Vpn_sanai/main/lib/bootstrap.sh" \
-        "https://cdn.jsdelivr.net/gh/Alirezahjf/Vpn_sanai@main/lib/bootstrap.sh" \
-        "https://gcore.jsdelivr.net/gh/Alirezahjf/Vpn_sanai@main/lib/bootstrap.sh" \
-        "https://ghproxy.net/https://raw.githubusercontent.com/Alirezahjf/Vpn_sanai/main/lib/bootstrap.sh"; do
+        "https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh" \
+        "https://cdn.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh" \
+        "https://gcore.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh" \
+        "https://ghproxy.net/https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh"; do
         if curl -fsSL --connect-timeout 15 --retry 2 --max-time 60 \
                 -o "${_tmpdir}/bootstrap.sh" "$_url" 2>/dev/null && [[ -s "${_tmpdir}/bootstrap.sh" ]]; then
             _ok=1
@@ -302,6 +315,7 @@ collect_choices() {
     is_port "$PANEL_PORT" || die "پورت پنل نامعتبر است: ${PANEL_PORT}"
     port_in_use "$PANEL_PORT" && PANEL_PORT="$(choose_free_port "$PANEL_PORT" "$PANEL_PORT_RANGE_MIN" "$PANEL_PORT_RANGE_MAX" "پورت پنل")"
 
+    panel_heal_placeholder_secrets
     [[ -n "$PANEL_USER" ]] || PANEL_USER="$(_default_or_ask PANEL_USER_DEFAULT "$(rand_string 10 'a-z0-9')" "نام کاربری پنل")"
     [[ -n "$PANEL_PASS" ]] || PANEL_PASS="$(_default_or_ask PANEL_PASS_DEFAULT "$(rand_password 20)" "رمز عبور پنل")"
     [[ -n "$PANEL_BASE_PATH_RAW" ]] || PANEL_BASE_PATH_RAW="$(_default_or_ask PANEL_BASE_PATH_DEFAULT "$(rand_string 14 'a-zA-Z0-9')" "مسیر مخفی پنل")"
@@ -367,9 +381,10 @@ collect_choices() {
     fi
 }
 
-# _default_or_ask <default-from-file> <fallback> <prompt>
+# _default_or_ask <name-of-default-var> <fallback> <prompt>
+# $1 is the NAME of a *_DEFAULT variable — resolved indirectly (${!1}).
 _default_or_ask() {
-    local from_file="${1:-}" fallback="$2" prompt="$3"
+    local from_file="${!1:-}" fallback="$2" prompt="$3"
     if [[ -n "$from_file" ]]; then
         printf '%s' "$from_file"; return 0
     fi
@@ -395,6 +410,35 @@ _toggle_or_ask() {
 }
 
 # --- panel bootstrap ---------------------------------------------------------
+# Older runs suffered a nameref bug in _default_or_ask that leaked the literal
+# placeholder names ("PANEL_USER_DEFAULT", ...) into state AND into the panel's
+# own credentials/base path. Detect those leftovers and regenerate them; the
+# caller re-applies to the live panel when the CLI is available.
+PANEL_HEALED_CREDS=0
+PANEL_HEALED_BASE=0
+panel_heal_placeholder_secrets() {
+    PANEL_HEALED_CREDS=0
+    PANEL_HEALED_BASE=0
+    if [[ "${PANEL_USER:-}" == "PANEL_USER_DEFAULT" ]]; then
+        PANEL_USER="$(rand_string 10 'a-z0-9')"
+        PANEL_HEALED_CREDS=1
+    fi
+    if [[ "${PANEL_PASS:-}" == "PANEL_PASS_DEFAULT" ]]; then
+        PANEL_PASS="$(rand_password 20)"
+        PANEL_HEALED_CREDS=1
+    fi
+    if [[ "${PANEL_BASE_PATH_RAW:-}" == "PANEL_BASE_PATH_DEFAULT" \
+       || "${PANEL_BASE_PATH:-}" == "/PANEL_BASE_PATH_DEFAULT/" ]]; then
+        PANEL_BASE_PATH_RAW="$(rand_string 14 'a-zA-Z0-9')"
+        PANEL_BASE_PATH="$(normalise_base_path "$PANEL_BASE_PATH_RAW")"
+        PANEL_HEALED_BASE=1
+    fi
+    if ((PANEL_HEALED_CREDS || PANEL_HEALED_BASE)); then
+        log_warn "مقادیر placeholder ذخیره‌شده از نسخهٔ قبلی پیدا و با مقادیر تصادفی جدید جایگزین شد"
+    fi
+    return 0
+}
+
 # _panel_plan_* helpers keep the flow readable.
 bootstrap_panel() {
     local reinstall=0
@@ -414,6 +458,18 @@ bootstrap_panel() {
     panel_probe_settings 2>/dev/null || true
     panel_read_install_result || true
     PANEL_BASE_PATH_RAW="$(base_path_raw "$PANEL_BASE_PATH")"
+
+    # Heal literal placeholder leftovers from the _default_or_ask nameref bug
+    # and push the regenerated secrets into the live panel as well.
+    panel_heal_placeholder_secrets
+    if ((PANEL_HEALED_CREDS)) && [[ -x "${XUI_BIN:-}" ]]; then
+        panel_reset_credentials "$PANEL_USER" "$PANEL_PASS" \
+            || log_warn "اعمال نام کاربری/رمز ترمیم‌شده روی پنل ناموفق بود"
+    fi
+    if ((PANEL_HEALED_BASE)) && [[ -x "${XUI_BIN:-}" ]]; then
+        run_quiet panel_cli setting -webBasePath "$PANEL_BASE_PATH_RAW" \
+            || log_warn "اعمال مسیر مخفی ترمیم‌شده روی پنل ناموفق بود"
+    fi
 
     PANEL_SCHEME="http"
 
@@ -545,6 +601,25 @@ create_inbounds_and_clients() {
     # fills VLESS_UUID/VLESS_PUBLIC_KEY/... from it.
     tcp_id="$(setup_reality_inbound "$VLESS_PORT" tcp "$VLESS_REMARK")" || die "ساخت Inbound اصلی ناموفق بود"
     VLESS_INBOUND_ID="$tcp_id"
+    # setup_reality_inbound necessarily runs inside a command-substitution
+    # subshell, so the VLESS_* material it resolves (reality keypair, chosen
+    # SNI, shortId) never reaches this shell. Read the inbound back and
+    # harvest it here; otherwise `set -u` aborts the final report on
+    # ${VLESS_PUBLIC_KEY}, persisted state/links come out empty, and the
+    # xhttp inbound below mints a different keypair instead of reusing this
+    # one. Retry a few times: the panel may need a beat before a freshly
+    # created inbound is readable back.
+    local _harvest_try _harvest_resp=""
+    for _harvest_try in 1 2 3 4 5; do
+        _harvest_resp="$(inbound_get_json "$tcp_id" 2>/dev/null || true)"
+        reality_harvest_from_inbound "$_harvest_resp" || true
+        [[ -n "${VLESS_PUBLIC_KEY:-}" ]] && break
+        sleep 1
+    done
+    if [[ -z "${VLESS_PUBLIC_KEY:-}" ]]; then
+        log_warn "بازیابی مشخصات Inbound ${tcp_id} از پنل ناموفق بود (لینک‌ها از روی API پنل ساخته می‌شوند)"
+        log_warn "  پاسخ خام پنل (۲۰۰ نویسه): $(printf '%.200s' "${_harvest_resp:-<empty>}")"
+    fi
 
     VLESS_UUID="${VLESS_UUID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || rand_hex 16)}"
     inbound_set_share_addr "$tcp_id" "$SERVER_IP" || true
@@ -571,9 +646,20 @@ create_inbounds_and_clients() {
 
     # ---- default client on the TCP inbound
     local email="$DEFAULT_CLIENT_EMAIL"
+    CLIENT_UUID_ACTUAL=""
     if ! client_add "$email" "$tcp_id" "$DEFAULT_CLIENT_TOTAL_GB" "$DEFAULT_CLIENT_EXPIRY_DAYS" \
             "$DEFAULT_CLIENT_LIMIT_IP" "$VLESS_FLOW" "$VLESS_UUID"; then
-        log_warn "ساخت کلاینت پیش‌فرض ناموفق بود؛ لینک از Inbound ساخته می‌شود"
+        log_warn "ساخت کلاینت پیش‌فرض ناموفق بود؛ وضعیت عضویت روی Inbound بررسی می‌شود"
+    fi
+    # Links must carry the uuid xray actually serves: panels may rewrite ids,
+    # and duplicate-email paths can leave an older identity on the inbound.
+    local actual_uuid="${CLIENT_UUID_ACTUAL:-}"
+    [[ -z "$actual_uuid" ]] && actual_uuid="$(client_uuid_in_inbound "$email" "${tcp_id:-}" 2>/dev/null || true)"
+    if [[ -n "$actual_uuid" ]]; then
+        [[ "$actual_uuid" != "$VLESS_UUID" ]] && log_info "UUID کلاینت پیش‌فرض با مقدار پنل هماهنگ شد"
+        VLESS_UUID="$actual_uuid"
+    else
+        log_warn "کلاینت پیش‌فرض «${email}» روی Inbound ${tcp_id} نیست؛ با vpn-sanai-add-client دوباره بسازید"
     fi
 
     # Additional emails requested on the command line
@@ -645,12 +731,12 @@ save_report() {
   توکن API     : ${PANEL_API_TOKEN}
 
 [کانفیگ VLESS + REALITY]
-  پورت         : ${VLESS_PORT}
-  SNI          : ${VLESS_SNI}
-  ShortId      : ${VLESS_SHORT_ID}
-  PublicKey    : ${VLESS_PUBLIC_KEY}
-  UUID پیش‌فرض  : ${VLESS_UUID}
-  Inbound ID   : ${VLESS_INBOUND_ID}
+  پورت         : ${VLESS_PORT:-}
+  SNI          : ${VLESS_SNI:-}
+  ShortId      : ${VLESS_SHORT_ID:-}
+  PublicKey    : ${VLESS_PUBLIC_KEY:-}
+  UUID پیش‌فرض  : ${VLESS_UUID:-}
+  Inbound ID   : ${VLESS_INBOUND_ID:-}
   xHTTP        : ${XHTTP_PORT:-غیرفعال} ${XHTTP_INBOUND_ID:+(inbound ${XHTTP_INBOUND_ID})}
 
 [امنیت]
@@ -690,9 +776,9 @@ final_summary() {
     kv "نام کاربری پنل" "$PANEL_USER"
     kv "رمز عبور پنل" "$PANEL_PASS"
     print_rule "کانفیگ VLESS + REALITY"
-    kv "آدرس کلاینت" "${SERVER_IP}:${VLESS_PORT}"
-    kv "SNI" "$VLESS_SNI"
-    kv "ShortId" "$VLESS_SHORT_ID"
+    kv "آدرس کلاینت" "${SERVER_IP}:${VLESS_PORT:-}"
+    kv "SNI" "${VLESS_SNI:-}"
+    kv "ShortId" "${VLESS_SHORT_ID:-}"
     local sub_id sub_link=""
     sub_id="$(client_sub_id "$DEFAULT_CLIENT_EMAIL" 2>/dev/null || true)"
     [[ -n "$sub_id" ]] && sub_link="$(sub_url "$sub_id")"
@@ -702,7 +788,7 @@ final_summary() {
     if [[ -n "${XHTTP_INBOUND_ID:-}" && -n "${XHTTP_PORT:-}" ]]; then
         local xhttp_link
         xhttp_link="$(build_vless_link "${VLESS_UUID:-}" "$SERVER_IP" "$XHTTP_PORT" "xhttp" \
-            "$VLESS_SNI" "$VLESS_SHORT_ID" "$VLESS_PUBLIC_KEY" "" \
+            "${VLESS_SNI:-}" "${VLESS_SHORT_ID:-}" "${VLESS_PUBLIC_KEY:-}" "" \
             "${VLESS_REMARK}-xhttp" "${XHTTP_PATH:-/}" "${XHTTP_MODE:-auto}")"
         print_rule "کانفیگ xHTTP (پورت ${XHTTP_PORT})"
         kv "لینک" "$xhttp_link"
@@ -873,13 +959,12 @@ action_add_client() {
     VLESS_PUBLIC_KEY="$(state_get VLESS_PUBLIC_KEY)"; VLESS_REMARK="$(state_get VLESS_REMARK)"
     VLESS_FLOW="xtls-rprx-vision"
 
-    # Each client has its own UUID: read it back from the panel.
-    local info uuid
-    info="$(client_info "$email")" || true
-    if [[ -n "$info" ]]; then
-        uuid="$(printf '%s' "$info" | jq -r '.client.id // .id // empty')"
-        [[ -n "$uuid" ]] && VLESS_UUID="$uuid"
-    fi
+    # Each client has its own UUID: read it back from the panel. (A numeric
+    # client row-id must never leak into VLESS_UUID — the link builder's
+    # default-client fallback consumes it.)
+    local uuid
+    uuid="$(client_resolve_uuid "$email" 2>/dev/null || true)"
+    [[ -n "$uuid" ]] && VLESS_UUID="$uuid"
     print_client_link "$email" || true
 }
 
@@ -915,13 +1000,17 @@ action_show_clients() {
         return 0
     fi
 
-    local e
+    local e show_inbound_id="${VLESS_INBOUND_ID:-$(state_get VLESS_INBOUND_ID)}"
     for e in "${emails[@]}"; do
         VLESS_UUID=""
+        # The inbound membership is the only uuid xray accepts; newer panels
+        # also return a numeric client row-id that must never go into a link.
+        VLESS_UUID="$(client_uuid_in_inbound "$e" "${show_inbound_id:-}" 2>/dev/null || true)"
         local info
         info="$(client_info "$e")" || true
-        if [[ -n "$info" ]]; then
+        if [[ -z "$VLESS_UUID" && -n "$info" ]]; then
             VLESS_UUID="$(printf '%s' "$info" | jq -r '.client.id // .id // empty')"
+            _is_uuid "$VLESS_UUID" || VLESS_UUID=""
         fi
         [[ -n "$VLESS_UUID" ]] || VLESS_UUID="$(state_get VLESS_UUID)"
         VLESS_PORT="${VLESS_PORT:-$(state_get VLESS_PORT)}"
@@ -1057,4 +1146,8 @@ main() {
     esac
 }
 
-main "$@"
+# Tests source this file to exercise individual functions; running main is
+# the default so piping / process substitution / direct execution all work.
+if [[ "${VPN_SANAI_NO_MAIN:-0}" != "1" ]]; then
+    main "$@"
+fi

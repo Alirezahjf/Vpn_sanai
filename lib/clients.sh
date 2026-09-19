@@ -101,16 +101,42 @@ client_add() {
 
     if api_silent POST "/panel/api/clients/add" "$body"; then
         log_ok "کلاینت «${email}» ساخته و به Inbound ${inbound_id} متصل شد"
+        [[ -n "$uuid" ]] && CLIENT_UUID_ACTUAL="$uuid"
         return 0
     fi
 
-    # Already present? attach it to the inbound instead of failing.
-    if printf '%s' "${API_ERROR:-}" | grep -qiE 'exist|duplicate|تکراری'; then
+    # Duplicate email (some panel versions enforce uniqueness panel-wide). If
+    # the client is already a member of THIS inbound there is nothing to do,
+    # but remember its actual uuid so printed links stay truthful.
+    # Match the real-world wordings: "email already in use" (3x-ui), "exists",
+    # "duplicate"… The plain "exist|duplicate" pattern used to miss the first
+    # one and the whole recovery ladder below never ran.
+    if printf '%s' "${API_ERROR:-}" | grep -qiE 'exist|duplicate|in use|تکراری'; then
+        local member_uuid
+        member_uuid="$(client_uuid_in_inbound "$email" "$inbound_id" 2>/dev/null || true)"
+        if [[ -n "$member_uuid" ]]; then
+            CLIENT_UUID_ACTUAL="$member_uuid"
+            log_info "کلاینت «${email}» از قبل عضو Inbound ${inbound_id} است"
+            if [[ -n "$uuid" && "$member_uuid" != "$uuid" ]]; then
+                log_warn "UUID «${email}» با مقدار درخواست‌شده متفاوت است؛ لینک با مقدار پنل ساخته می‌شود"
+            fi
+            return 0
+        fi
         log_warn "کلاینت «${email}» از قبل وجود دارد؛ به Inbound ${inbound_id} متصل می‌شود"
         local attach
         attach="$(jq -nc --argjson id "$inbound_id" '{inboundIds:[$id]}')"
         if api_silent POST "/panel/api/clients/$(url_encode "$email")/attach" "$attach"; then
             log_ok "کلاینت «${email}» به Inbound ${inbound_id} متصل شد"
+            return 0
+        fi
+        # Panels without an attach endpoint: drop the stale record and recreate
+        # it bound to this inbound, otherwise printed links point at a client
+        # xray does not serve.
+        log_warn "اتصال پشتیبانی نشد؛ رکورد قدیمی «${email}» حذف و دوباره ساخته می‌شود"
+        client_delete "$email" >/dev/null 2>&1 || true
+        if api_silent POST "/panel/api/clients/add" "$body"; then
+            log_ok "کلاینت «${email}» ساخته و به Inbound ${inbound_id} متصل شد"
+            [[ -n "$uuid" ]] && CLIENT_UUID_ACTUAL="$uuid"
             return 0
         fi
     fi
@@ -214,6 +240,39 @@ client_info() {
     api_get_obj "/panel/api/clients/get/$(url_encode "$email")" 2>/dev/null || true
 }
 
+# The VLESS/REALITY uuid is what xray authenticates with. Newer panels keep a
+# separate numeric row-id on the global client record — that must never end up
+# in a link (observed live: links printed as vless://1@… and vless://2@…).
+_is_uuid() {
+    [[ "${1:-}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
+
+# client_uuid_in_inbound <email> <inbound-id> -> the member uuid, empty when the
+# email is not attached to that inbound. This is the authoritative source for
+# links because xray authenticates against the inbound's settings.
+client_uuid_in_inbound() {
+    local email="$1" inbound_id="$2"
+    [[ -n "$email" && -n "$inbound_id" ]] || return 1
+    inbound_get_json "$inbound_id" 2>/dev/null | jq -r --arg e "$email" \
+        '.settings.clients[]? | select(.email == $e) | .id' 2>/dev/null | head -1
+}
+
+# client_resolve_uuid <email> [inbound-id] -> best link-safe uuid or empty.
+# Membership first; the global client record's id only when it is uuid-shaped.
+client_resolve_uuid() {
+    local email="$1" inbound_id="${2:-${VLESS_INBOUND_ID:-$(state_get VLESS_INBOUND_ID 2>/dev/null || true)}}"
+    local uuid info candidate=""
+    uuid="$(client_uuid_in_inbound "$email" "${inbound_id:-}" 2>/dev/null || true)"
+    if [[ -z "$uuid" ]]; then
+        info="$(client_info "$email" 2>/dev/null || true)"
+        if [[ -n "$info" ]]; then
+            candidate="$(printf '%s' "$info" | jq -r '.client.id // .id // empty' 2>/dev/null || true)"
+            _is_uuid "${candidate:-}" && uuid="$candidate"
+        fi
+    fi
+    printf '%s' "$uuid"
+}
+
 client_sub_id() {
     local email="$1"
     local info
@@ -223,13 +282,48 @@ client_sub_id() {
 }
 
 # --- presentation ------------------------------------------------------------
+# Newer 3x-ui versions randomise the subscription endpoint just like the web
+# base path: sub is served at {subDomain|host}:{subPort}{subPath}{subId}, over
+# TLS when subCertFile is set. We used to hardcode http://IP:PORT/sub/{id}
+# which 404s on such panels. Read the real settings once per process.
+_panel_sub_settings() {
+    : "${_PANEL_SUB_CACHE:=}" "${_PANEL_SUB_CACHE_AT:=0}"
+    local now; now="$(date +%s)"
+    if [[ -n "$_PANEL_SUB_CACHE" ]] && (( now - _PANEL_SUB_CACHE_AT < 300 )); then
+        printf '%s' "$_PANEL_SUB_CACHE"
+        return 0
+    fi
+    local obj
+    obj="$(panel_settings_all 2>/dev/null || true)"
+    if [[ -n "$obj" ]]; then
+        _PANEL_SUB_CACHE="$obj"
+        _PANEL_SUB_CACHE_AT="$now"
+    fi
+    printf '%s' "$obj"
+}
+
 sub_url() {
     local sub_id="$1"
-    local host="${SERVER_IP:-$(state_get SERVER_IP)}"
-    local port="${SUB_PORT:-$(state_get SUB_PORT)}"
-    local path="${SUB_PATH:-$(state_get SUB_PATH)}"
-    [[ -n "$sub_id" && -n "$host" ]] || return 1
-    printf 'http://%s:%s%s%s' "$(link_host "$host")" "$port" "${path%/}" "/${sub_id}"
+    [[ -n "$sub_id" ]] || return 1
+    local settings="" scheme="" host="" port="" path=""
+    settings="$(_panel_sub_settings)"
+    if [[ -n "$settings" ]]; then
+        port="$(printf '%s' "$settings" | jq -r '.subPort // empty' 2>/dev/null)"
+        path="$(printf '%s' "$settings" | jq -r '.subPath // empty' 2>/dev/null)"
+        host="$(printf '%s' "$settings" | jq -r '.subDomain // empty' 2>/dev/null)"
+        scheme="$(printf '%s' "$settings" | jq -r '
+            if ((.subCertFile // "") != "") or ((.subTLS // false) == true) or ((.subTLS // "") == "true")
+            then "https" else "http" end' 2>/dev/null)"
+    fi
+    port="${port:-${SUB_PORT:-$(state_get SUB_PORT)}}"
+    host="${host:-${SERVER_IP:-$(state_get SERVER_IP)}}"
+    [[ -n "$host" && -n "$port" ]] || return 1
+    if [[ -z "$path" ]]; then
+        path="${SUB_PATH:-$(state_get SUB_PATH "/sub/")}"
+    fi
+    [[ "$path" == /* ]] || path="/${path}"
+    [[ "$path" == */ ]] || path="${path}/"
+    printf '%s://%s:%s%s%s' "${scheme:-http}" "$(link_host "$host")" "$port" "$path" "$sub_id"
 }
 
 # show_qr <text> [file.png] -> terminal QR plus an optional PNG copy
@@ -274,20 +368,31 @@ print_client_link() {
     local email="$1"
     local link sub uuid info
     # Every client carries its own UUID; read it back so the QR we print can
-    # never point at a stale identity.
-    info="$(client_info "$email" 2>/dev/null || true)"
-    if [[ -n "$info" ]]; then
-        uuid="$(printf '%s' "$info" | jq -r '.client.id // .id // empty' 2>/dev/null || true)"
+    # never point at a stale identity. The authoritative source is the inbound
+    # membership (xray authenticates against it). Newer panels expose a numeric
+    # row-id on the global client record — never put that in a link.
+    # Panel-side share links mirror the exact inbound (uuid, spiderX, port)
+    # that xray serves — prefer them whenever the API answers; the local build
+    # stays as the offline backup.
+    link="$(client_links_api "$email" 2>/dev/null | grep '^vless://' | head -1 || true)"
+    if [[ -z "$link" ]]; then
+        local inbound_id="${VLESS_INBOUND_ID:-$(state_get VLESS_INBOUND_ID 2>/dev/null || true)}"
+        uuid="$(client_resolve_uuid "$email" "${inbound_id:-}")"
+        if [[ -n "$uuid" ]]; then
+            link="$(build_client_link_from_state "$email" "$uuid" || true)"
+        elif [[ "$email" == "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" \
+                || -z "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" ]]; then
+            # Offline-safe fallback only for the installer-managed default client.
+            link="$(build_client_link_from_state "$email" "" || true)"
+        fi
     fi
-    link="$(build_client_link_from_state "$email" "${uuid:-}" || true)"
-    sub="$(client_sub_id "$email" 2>/dev/null || true)"
 
     if [[ -z "$link" ]]; then
-        log_warn "لینک محلی ساخته نشد؛ سراغ API پنل می‌روم"
-        link="$(client_links_api "$email" | head -1 || true)"
+        log_error "لینکی برای ${email} پیدا نشد (نه API پنل، نه ساخت محلی)"
+        return 1
     fi
-    [[ -n "$link" ]] || { log_error "لینکی برای ${email} پیدا نشد"; return 1; }
 
+    sub="$(client_sub_id "$email" 2>/dev/null || true)"
     printf '\n' >&2
     kv "نام کلاینت" "$email"
     kv "لینک" "$link"

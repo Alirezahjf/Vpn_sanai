@@ -282,13 +282,48 @@ client_sub_id() {
 }
 
 # --- presentation ------------------------------------------------------------
+# Newer 3x-ui versions randomise the subscription endpoint just like the web
+# base path: sub is served at {subDomain|host}:{subPort}{subPath}{subId}, over
+# TLS when subCertFile is set. We used to hardcode http://IP:PORT/sub/{id}
+# which 404s on such panels. Read the real settings once per process.
+_panel_sub_settings() {
+    : "${_PANEL_SUB_CACHE:=}" "${_PANEL_SUB_CACHE_AT:=0}"
+    local now; now="$(date +%s)"
+    if [[ -n "$_PANEL_SUB_CACHE" ]] && (( now - _PANEL_SUB_CACHE_AT < 300 )); then
+        printf '%s' "$_PANEL_SUB_CACHE"
+        return 0
+    fi
+    local obj
+    obj="$(panel_settings_all 2>/dev/null || true)"
+    if [[ -n "$obj" ]]; then
+        _PANEL_SUB_CACHE="$obj"
+        _PANEL_SUB_CACHE_AT="$now"
+    fi
+    printf '%s' "$obj"
+}
+
 sub_url() {
     local sub_id="$1"
-    local host="${SERVER_IP:-$(state_get SERVER_IP)}"
-    local port="${SUB_PORT:-$(state_get SUB_PORT)}"
-    local path="${SUB_PATH:-$(state_get SUB_PATH)}"
-    [[ -n "$sub_id" && -n "$host" ]] || return 1
-    printf 'http://%s:%s%s%s' "$(link_host "$host")" "$port" "${path%/}" "/${sub_id}"
+    [[ -n "$sub_id" ]] || return 1
+    local settings="" scheme="" host="" port="" path=""
+    settings="$(_panel_sub_settings)"
+    if [[ -n "$settings" ]]; then
+        port="$(printf '%s' "$settings" | jq -r '.subPort // empty' 2>/dev/null)"
+        path="$(printf '%s' "$settings" | jq -r '.subPath // empty' 2>/dev/null)"
+        host="$(printf '%s' "$settings" | jq -r '.subDomain // empty' 2>/dev/null)"
+        scheme="$(printf '%s' "$settings" | jq -r '
+            if ((.subCertFile // "") != "") or ((.subTLS // false) == true) or ((.subTLS // "") == "true")
+            then "https" else "http" end' 2>/dev/null)"
+    fi
+    port="${port:-${SUB_PORT:-$(state_get SUB_PORT)}}"
+    host="${host:-${SERVER_IP:-$(state_get SERVER_IP)}}"
+    [[ -n "$host" && -n "$port" ]] || return 1
+    if [[ -z "$path" ]]; then
+        path="${SUB_PATH:-$(state_get SUB_PATH "/sub/")}"
+    fi
+    [[ "$path" == /* ]] || path="/${path}"
+    [[ "$path" == */ ]] || path="${path}/"
+    printf '%s://%s:%s%s%s' "${scheme:-http}" "$(link_host "$host")" "$port" "$path" "$sub_id"
 }
 
 # show_qr <text> [file.png] -> terminal QR plus an optional PNG copy
@@ -336,26 +371,28 @@ print_client_link() {
     # never point at a stale identity. The authoritative source is the inbound
     # membership (xray authenticates against it). Newer panels expose a numeric
     # row-id on the global client record — never put that in a link.
-    local inbound_id="${VLESS_INBOUND_ID:-$(state_get VLESS_INBOUND_ID 2>/dev/null || true)}"
-    uuid="$(client_resolve_uuid "$email" "${inbound_id:-}")"
-    sub="$(client_sub_id "$email" 2>/dev/null || true)"
-
-    link=""
-    if [[ -n "$uuid" ]]; then
-        link="$(build_client_link_from_state "$email" "$uuid" || true)"
-    elif [[ "$email" == "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" \
-            || -z "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" ]]; then
-        # Offline-safe fallback only for the installer-managed default client;
-        # for any other email it would smuggle that client's uuid into the link.
-        link="$(build_client_link_from_state "$email" "" || true)"
+    # Panel-side share links mirror the exact inbound (uuid, spiderX, port)
+    # that xray serves — prefer them whenever the API answers; the local build
+    # stays as the offline backup.
+    link="$(client_links_api "$email" 2>/dev/null | grep '^vless://' | head -1 || true)"
+    if [[ -z "$link" ]]; then
+        local inbound_id="${VLESS_INBOUND_ID:-$(state_get VLESS_INBOUND_ID 2>/dev/null || true)}"
+        uuid="$(client_resolve_uuid "$email" "${inbound_id:-}")"
+        if [[ -n "$uuid" ]]; then
+            link="$(build_client_link_from_state "$email" "$uuid" || true)"
+        elif [[ "$email" == "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" \
+                || -z "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" ]]; then
+            # Offline-safe fallback only for the installer-managed default client.
+            link="$(build_client_link_from_state "$email" "" || true)"
+        fi
     fi
 
     if [[ -z "$link" ]]; then
-        log_warn "لینک محلی قابل‌اطمینان ساخته نشد (کلاینت عضو Inbound فعلی نیست؟)؛ سراغ API پنل می‌روم"
-        link="$(client_links_api "$email" | head -1 || true)"
+        log_error "لینکی برای ${email} پیدا نشد (نه API پنل، نه ساخت محلی)"
+        return 1
     fi
-    [[ -n "$link" ]] || { log_error "لینکی برای ${email} پیدا نشد"; return 1; }
 
+    sub="$(client_sub_id "$email" 2>/dev/null || true)"
     printf '\n' >&2
     kv "نام کلاینت" "$email"
     kv "لینک" "$link"

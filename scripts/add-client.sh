@@ -82,7 +82,10 @@ if [[ -z "$CLIENT_UUID" ]]; then
 fi
 [[ -n "$CLIENT_UUID" ]] || CLIENT_UUID="$VLESS_UUID"
 
-LINK="$(build_vless_link "$CLIENT_UUID" "$SERVER_IP" "$VLESS_PORT" "tcp" \
+# Prefer the panel's own share link (exact uuid/spiderX of the serving
+# inbound); build locally only when the API returns nothing.
+LINK="$(client_links_api "$EMAIL" 2>/dev/null | grep '^vless://' | head -1 || true)"
+[[ -n "$LINK" ]] || LINK="$(build_vless_link "$CLIENT_UUID" "$SERVER_IP" "$VLESS_PORT" "tcp" \
         "$VLESS_SNI" "$VLESS_SHORT_ID" "$VLESS_PUBLIC_KEY" "$VLESS_FLOW" "$EMAIL")"
 SUB_ID="$(client_sub_id "$EMAIL" 2>/dev/null || true)"
 SUB_URL=""; [[ -n "$SUB_ID" ]] && SUB_URL="$(sub_url "$SUB_ID")"

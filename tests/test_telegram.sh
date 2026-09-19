@@ -679,7 +679,9 @@ test_it_link_command() {
     it_feed_message "$ADMIN_ID" "/link ali"
     it_bot_run
     it_sent_texts | grep -q "vless://" || { it_stop; return 1; }
-    it_sent_texts | grep -q "203.0.113.9:443" || { it_stop; return 1; }
+    # The bot trusts the panel's own share link first (uuid/spiderX-exact);
+    # the mock panel serves panel.example.com for it.
+    it_sent_texts | grep -q "panel.example.com:443" || { it_stop; return 1; }
     # subscription link is included when the panel returns a subId
     it_sent_texts | grep -q "sub/"
     it_stop

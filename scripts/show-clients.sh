@@ -74,12 +74,14 @@ while read -r email; do
     sub_id="$(printf '%s' "${info:-{\}}" | jq -r '.client.subId // .subId // empty' 2>/dev/null || true)"
     [[ -n "$sub_id" ]] || sub_id="$(client_sub_id "$email" 2>/dev/null || true)"
 
-    if [[ -n "$uuid" ]]; then
-        link="$(build_vless_link "$uuid" "$SERVER_IP" "$VLESS_PORT" "tcp" \
-                "$VLESS_SNI" "$VLESS_SHORT_ID" "$VLESS_PUBLIC_KEY" "$VLESS_FLOW" "$email")"
-    else
-        log_warn "«${email}» روی Inbound ${VLESS_INBOUND_ID:-?} عضو نیست؛ لینک از API پنل گرفته می‌شود"
-        link="$(client_links_api "$email" 2>/dev/null | head -1 || true)"
+    # Panel-side share links are exact (uuid/spiderX of the inbound xray
+    # serves); fall back to the local build only when the API has nothing.
+    link="$(client_links_api "$email" 2>/dev/null | grep '^vless://' | head -1 || true)"
+    if [[ -z "$link" ]]; then
+        if [[ -n "$uuid" ]]; then
+            link="$(build_vless_link "$uuid" "$SERVER_IP" "$VLESS_PORT" "tcp" \
+                    "$VLESS_SNI" "$VLESS_SHORT_ID" "$VLESS_PUBLIC_KEY" "$VLESS_FLOW" "$email")"
+        fi
         [[ -n "$link" ]] || { log_error "لینکی برای ${email} ساخته نشد"; continue; }
     fi
     sub=""; [[ -n "$sub_id" ]] && sub="$(sub_url "$sub_id")"

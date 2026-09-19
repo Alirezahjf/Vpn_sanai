@@ -1435,19 +1435,25 @@ bot_action_client_qr() {
 # bot_send_client_link <chat> <email> -> link + QR photo + subscription
 bot_send_client_link() {
     local chat="$1" email="$2"
-    local info uuid link sub sub_id
-    # The membership uuid on the serving inbound is authoritative; the panel's
-    # numeric row-id is not a uuid (bot used to send broken vless://1@… links).
-    uuid="$(client_resolve_uuid "$email" 2>/dev/null || true)"
-    link=""
-    if [[ -n "$uuid" ]]; then
-        link="$(build_client_link_from_state "$email" "$uuid" 2>/dev/null || true)"
-    elif [[ "$email" == "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" \
-            || -z "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" ]]; then
-        # Offline-safe fallback only for the installer-managed default client.
-        link="$(build_client_link_from_state "$email" "" 2>/dev/null || true)"
+    local uuid link links sub sub_id extra=0
+    # Trust the panel's own share links first: they mirror the exact inbound
+    # (uuid, spiderX, port) xray actually serves. The bot used to send links
+    # built from state defaults — wrong uuid and spiderX on panels with
+    # numeric client row-ids or custom inbounds.
+    links="$(client_links_api "$email" 2>/dev/null | grep '^vless://' || true)"
+    if [[ -n "$links" ]]; then
+        link="$(printf '%s\n' "$links" | head -1)"
+        extra=$(( $(printf '%s\n' "$links" | grep -c '^vless://') - 1 ))
+    else
+        uuid="$(client_resolve_uuid "$email" 2>/dev/null || true)"
+        if [[ -n "$uuid" ]]; then
+            link="$(build_client_link_from_state "$email" "$uuid" 2>/dev/null || true)"
+        elif [[ "$email" == "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" \
+                || -z "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" ]]; then
+            # Offline-safe fallback only for the installer-managed default client.
+            link="$(build_client_link_from_state "$email" "" 2>/dev/null || true)"
+        fi
     fi
-    [[ -n "$link" ]] || link="$(client_links_api "$email" 2>/dev/null | head -1 || true)"
     if [[ -z "$link" ]]; then
         bot_reply "$chat" "❌ لینک «$(tg_escape_html "$email")» ساخته نشد." >/dev/null
         return 0
@@ -1460,6 +1466,7 @@ bot_send_client_link() {
     text="🔗 <b>کانفیگ $(tg_escape_html "$email")</b>
 
 <code>$(tg_escape_html "$link")</code>"
+    (( extra > 0 )) && text+=$'\n'"➕ این اکانت روی ${extra} Inbound دیگر هم است؛ کانفیگ‌هایش را از لینک اشتراک یا پنل بردارید."
     [[ -n "$sub" ]] && text+=$'\n\n'"📎 <b>لینک اشتراک</b> (آپدیت خودکار):
 <code>$(tg_escape_html "$sub")</code>"
 

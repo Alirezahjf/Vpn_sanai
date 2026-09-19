@@ -162,3 +162,20 @@ test_client_add_duplicate_recreates_via_delete_ladder() {
     assert_eq "2" "$add_calls" "دو بار تلاش add" || return 1
     assert_eq "ffffffff-0000-1111-2222-333333333333" "$CLIENT_UUID_ACTUAL" "UUID بازسازی" || return 1
 }
+
+test_sub_url_uses_panel_subpath_and_tls() {
+    # Regression: newer panels serve sub at /{randomised subPath}/{subId} over
+    # TLS; the hardcoded http://…/sub/{id} link 404'd on the real server.
+    _PANEL_SUB_CACHE='{"subPath":"/82fum5xhiuic2p8x/","subPort":"2096","subDomain":"","subCertFile":"/etc/ssl/panel.crt","subTLS":"true"}'
+    _PANEL_SUB_CACHE_AT="$(date +%s)"
+    SERVER_IP="203.0.113.9"; SUB_PORT="2096"; SUB_PATH="/sub/"
+    assert_eq "https://203.0.113.9:2096/82fum5xhiuic2p8x/ABC123" "$(sub_url ABC123)" "sub با subPath پنل" || return 1
+}
+
+test_sub_url_falls_back_to_legacy_path() {
+    _PANEL_SUB_CACHE='{}'
+    _PANEL_SUB_CACHE_AT="$(date +%s)"
+    panel_settings_all() { printf '%s' ''; }
+    SERVER_IP="203.0.113.9"; SUB_PORT="2096"; SUB_PATH="/sub/"
+    assert_eq "http://203.0.113.9:2096/sub/ABC123" "$(sub_url ABC123)" "fallback قدیمی" || return 1
+}

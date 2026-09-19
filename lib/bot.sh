@@ -1436,11 +1436,17 @@ bot_action_client_qr() {
 bot_send_client_link() {
     local chat="$1" email="$2"
     local info uuid link sub sub_id
-    info="$(client_info "$email" 2>/dev/null)" || true
-    if [[ -n "$info" ]]; then
-        uuid="$(printf '%s' "$info" | jq -r '(.client.id // .id // empty)' 2>/dev/null || true)"
+    # The membership uuid on the serving inbound is authoritative; the panel's
+    # numeric row-id is not a uuid (bot used to send broken vless://1@… links).
+    uuid="$(client_resolve_uuid "$email" 2>/dev/null || true)"
+    link=""
+    if [[ -n "$uuid" ]]; then
+        link="$(build_client_link_from_state "$email" "$uuid" 2>/dev/null || true)"
+    elif [[ "$email" == "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" \
+            || -z "$(state_get DEFAULT_CLIENT_EMAIL 2>/dev/null || true)" ]]; then
+        # Offline-safe fallback only for the installer-managed default client.
+        link="$(build_client_link_from_state "$email" "" 2>/dev/null || true)"
     fi
-    link="$(build_client_link_from_state "$email" "${uuid:-}" 2>/dev/null || true)"
     [[ -n "$link" ]] || link="$(client_links_api "$email" 2>/dev/null | head -1 || true)"
     if [[ -z "$link" ]]; then
         bot_reply "$chat" "❌ لینک «$(tg_escape_html "$email")» ساخته نشد." >/dev/null

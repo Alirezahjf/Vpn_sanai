@@ -959,13 +959,12 @@ action_add_client() {
     VLESS_PUBLIC_KEY="$(state_get VLESS_PUBLIC_KEY)"; VLESS_REMARK="$(state_get VLESS_REMARK)"
     VLESS_FLOW="xtls-rprx-vision"
 
-    # Each client has its own UUID: read it back from the panel.
-    local info uuid
-    info="$(client_info "$email")" || true
-    if [[ -n "$info" ]]; then
-        uuid="$(printf '%s' "$info" | jq -r '.client.id // .id // empty')"
-        [[ -n "$uuid" ]] && VLESS_UUID="$uuid"
-    fi
+    # Each client has its own UUID: read it back from the panel. (A numeric
+    # client row-id must never leak into VLESS_UUID — the link builder's
+    # default-client fallback consumes it.)
+    local uuid
+    uuid="$(client_resolve_uuid "$email" 2>/dev/null || true)"
+    [[ -n "$uuid" ]] && VLESS_UUID="$uuid"
     print_client_link "$email" || true
 }
 

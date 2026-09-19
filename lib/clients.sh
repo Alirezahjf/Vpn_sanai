@@ -257,6 +257,22 @@ client_uuid_in_inbound() {
         '.settings.clients[]? | select(.email == $e) | .id' 2>/dev/null | head -1
 }
 
+# client_resolve_uuid <email> [inbound-id] -> best link-safe uuid or empty.
+# Membership first; the global client record's id only when it is uuid-shaped.
+client_resolve_uuid() {
+    local email="$1" inbound_id="${2:-${VLESS_INBOUND_ID:-$(state_get VLESS_INBOUND_ID 2>/dev/null || true)}}"
+    local uuid info candidate=""
+    uuid="$(client_uuid_in_inbound "$email" "${inbound_id:-}" 2>/dev/null || true)"
+    if [[ -z "$uuid" ]]; then
+        info="$(client_info "$email" 2>/dev/null || true)"
+        if [[ -n "$info" ]]; then
+            candidate="$(printf '%s' "$info" | jq -r '.client.id // .id // empty' 2>/dev/null || true)"
+            _is_uuid "${candidate:-}" && uuid="$candidate"
+        fi
+    fi
+    printf '%s' "$uuid"
+}
+
 client_sub_id() {
     local email="$1"
     local info
@@ -321,14 +337,7 @@ print_client_link() {
     # membership (xray authenticates against it). Newer panels expose a numeric
     # row-id on the global client record — never put that in a link.
     local inbound_id="${VLESS_INBOUND_ID:-$(state_get VLESS_INBOUND_ID 2>/dev/null || true)}"
-    uuid="$(client_uuid_in_inbound "$email" "${inbound_id:-}" 2>/dev/null || true)"
-    if [[ -z "$uuid" ]]; then
-        info="$(client_info "$email" 2>/dev/null || true)"
-        if [[ -n "$info" ]]; then
-            uuid="$(printf '%s' "$info" | jq -r '.client.id // .id // empty' 2>/dev/null || true)"
-            _is_uuid "${uuid:-}" || uuid=""
-        fi
-    fi
+    uuid="$(client_resolve_uuid "$email" "${inbound_id:-}")"
     sub="$(client_sub_id "$email" 2>/dev/null || true)"
 
     link=""

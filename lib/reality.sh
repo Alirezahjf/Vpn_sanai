@@ -362,6 +362,8 @@ reality_broken_inbounds() {
         .[]?
         | . as $i
         | ($i.streamSettings | norm) as $s
+        # a disabled inbound is not handed to xray at all
+        | select($i.enable != false)
         | select(($s.security // "") == "reality")
         | ($s.realitySettings // {}) as $r
         | if ($r | blank_names) == 0 then "\($i.id | tostring)\tserverNames"
@@ -422,7 +424,7 @@ reality_repair_inbounds() {
     fi
     log_info "SNI مورد استفاده برای ترمیم: ${sni}"
 
-    local fixed=0 failed=0 inbound body
+    local fixed=0 failed=0 parked=0 inbound body key_empty
     for id in "${targets[@]}"; do
         inbound="$(inbound_get_json "$id" 2>/dev/null || true)"
         if [[ -z "$inbound" ]]; then
@@ -454,7 +456,13 @@ reality_repair_inbounds() {
                    then .serverNames = [$sni] else . end)
                 | (if ((.target // "") | clean) == ""
                    then .target = ($sni + ":" + $tport) else . end)
-              )' 2>/dev/null)" || body=""
+              )
+            # A REALITY inbound without a privateKey can never work; xray would
+            # still refuse the whole config, so park it disabled and let the
+            # user delete it from the panel. (Top level: not inside the
+            # realitySettings object.)
+            | (if ((.streamSettings.realitySettings.privateKey // "") | clean) == ""
+               then .enable = false else . end)' 2>/dev/null)" || body=""
 
         if [[ -z "$body" ]]; then
             log_error "ساخت بدنهٔ ترمیم برای Inbound ${id} ناموفق بود"
@@ -462,9 +470,18 @@ reality_repair_inbounds() {
             continue
         fi
 
+        key_empty="$(printf '%s' "$inbound" | jq -r \
+            '(.streamSettings.realitySettings.privateKey // "") | tostring
+             | gsub("^[[:space:]]+|[[:space:]]+$"; "")' 2>/dev/null || echo x)"
+
         if api_silent POST "/panel/api/inbounds/update/${id}" "$body"; then
-            log_ok "Inbound ${id} ترمیم شد (serverNames=${sni})"
-            fixed=$((fixed + 1))
+            if [[ -z "$key_empty" ]]; then
+                log_warn "Inbound ${id} کلید خصوصی REALITY نداشت — قابل ترمیم نبود، غیرفعال شد (enable=false) تا Xray بالا بیاید. این Inbound را از پنل حذف کنید."
+                parked=$((parked + 1))
+            else
+                log_ok "Inbound ${id} ترمیم شد (serverNames=${sni})"
+                fixed=$((fixed + 1))
+            fi
         else
             log_error "به‌روزرسانی Inbound ${id} ناموفق بود: ${API_ERROR:-نامشخص}"
             failed=$((failed + 1))
@@ -484,6 +501,6 @@ reality_repair_inbounds() {
         log_error "هنوز Inbound ناقص باقی است: $(printf '%s' "$after" | tr '\t' ' ' | tr '\n' ' ')"
         return 1
     fi
-    log_ok "پیکربندی REALITY سالم شد و Xray راه‌اندازی مجدد شد (${fixed} Inbound ترمیم شد)"
+    log_ok "پیکربندی REALITY سالم شد و Xray راه‌اندازی مجدد شد (${fixed} ترمیم، ${parked} غیرفعال)"
     return 0
 }

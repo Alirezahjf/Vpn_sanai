@@ -280,6 +280,12 @@ _seed_reality_breakage() {
    "streamSettings": {"network": "tcp", "security": "reality",
      "realitySettings": {"target": "", "serverNames": [],
                          "privateKey": "PRIV=="}},
+   "sniffing": {"enabled": true}},
+  {"id": 9, "remark": "keyless", "port": 26771, "protocol": "vless",
+   "settings": {"clients": []},
+   "streamSettings": {"network": "tcp", "security": "reality",
+     "realitySettings": {"target": "www.apple.com:443",
+                         "serverNames": ["www.apple.com"]}},
    "sniffing": {"enabled": true}}
 ]}
 JSON
@@ -289,7 +295,8 @@ case_broken_inbounds_are_detected() {
     local list out
     list="$(api_get_obj "/panel/api/inbounds/list")" || return 1
     out="$(reality_broken_inbounds "$list")"
-    assert_eq $'8\tserverNames' "$out" "فقط inbound ناقص گزارش شود" || return 1
+    assert_eq $'8\tserverNames\n9\tprivateKey' "$out" \
+        "هر دو inbound ناقص گزارش شوند" || return 1
 }
 
 case_repair_fixes_empty_server_names() {
@@ -344,4 +351,59 @@ test_repair_leaves_healthy_inbounds_alone() {
     MOCK_SEED="${VPN_SANAI_TEST_ROOT}/reality-breakage.json" \
         with_mock case_repair_keeps_healthy_inbounds_alone \
         || fail "ترمیم نباید Inbound سالم را تغییر دهد"
+}
+
+case_repair_parks_inbound_without_private_key() {
+    REALITY_REPAIR_WAIT=0
+    # A REALITY inbound without a privateKey can never work; xray would still
+    # refuse the whole config, so it must be disabled instead of left broken.
+    reality_repair_inbounds "www.apple.com" || return 1
+
+    local list
+    list="$(api_get_obj "/panel/api/inbounds/list")" || return 1
+    assert_eq "" "$(reality_broken_inbounds "$list")" \
+        "پس از ترمیم نباید Inbound فعالِ ناقصی باقی مانده باشد" || return 1
+    assert_eq "false" \
+        "$(printf '%s' "$list" | jq -r '.[]|select(.id==9)|.enable')" \
+        "Inbound بدون کلید خصوصی باید غیرفعال شود تا Xray بالا بیاید" || return 1
+    assert_eq "www.apple.com" \
+        "$(printf '%s' "$list" | jq -r '.[]|select(.id==8)|(.streamSettings|fromjson).realitySettings.serverNames[0]')" \
+        "بقیهٔ Inboundهای ناقص باید ترمیم شوند" || return 1
+    assert_eq "false" \
+        "$(printf '%s' "$list" | jq -r '.[]|select(.id==9)|.enable')" \
+        "Inbound کلیددار نباید غیرفعال شود" || return 1
+}
+
+test_repair_parks_inbound_without_private_key() {
+    _seed_reality_breakage
+    MOCK_SEED="${VPN_SANAI_TEST_ROOT}/reality-breakage.json" \
+        with_mock case_repair_parks_inbound_without_private_key \
+        || fail "Inbound بدون privateKey باید غیرفعال شود تا Xray بالا بیاید"
+}
+
+case_diagnose_reality_lists_broken_inbounds() {
+    cat > "${VPN_SANAI_TEST_ROOT}/diag-state.env" <<STATE
+PANEL_SCHEME='http'
+PANEL_PORT='${PANEL_PORT}'
+PANEL_BASE_PATH='${MOCK_BASE_PATH}'
+PANEL_API_TOKEN='${MOCK_TOKEN}'
+STATE
+    local out
+    out="$(VPN_SANAI_STATE_FILE="${VPN_SANAI_TEST_ROOT}/diag-state.env" \
+        bash "${ROOT_DIR}/scripts/diagnose-reality.sh")" || return 1
+    assert_contains "$out" "Inbound 8" "Inbound ناقص باید گزارش شود" || return 1
+    assert_contains "$out" "Inbound 9" "Inbound بدون کلید خصوصی هم گزارش شود" || return 1
+    assert_match 'serverNames خالی' "$out" "دلیل خرابی باید گفته شود" || return 1
+    if printf '%s' "$out" | grep -q 'Inbound 7'; then
+        fail "Inbound سالم نباید در گزارش خرابی بیاید"
+        return 1
+    fi
+    return 0
+}
+
+test_diagnose_reality_lists_broken_inbounds() {
+    _seed_reality_breakage
+    MOCK_SEED="${VPN_SANAI_TEST_ROOT}/reality-breakage.json" \
+        with_mock case_diagnose_reality_lists_broken_inbounds \
+        || fail "diagnose-reality.sh باید Inboundهای ناقص را فهرست کند"
 }

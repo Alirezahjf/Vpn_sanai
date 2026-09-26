@@ -38,6 +38,7 @@ _bootstrap_files=(
     "scripts/backup.sh"
     "scripts/security.sh"
     "scripts/status.sh"
+    "scripts/diagnose-reality.sh"
     "scripts/uninstall.sh"
     "scripts/telegram-bot.sh"
 )

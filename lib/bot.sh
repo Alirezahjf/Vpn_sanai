@@ -1971,11 +1971,21 @@ bot_cmd_fix() {
     tg_chat_action "$chat" typing >/dev/null 2>&1 || true
     bot_reply "$chat" "🔧 ${count} Inbound REALITY ناقص پیدا شد — در حال ترمیم…" >/dev/null 2>&1 || true
 
-    if REALITY_REPAIR_WAIT=1 reality_repair_inbounds "$rest" >/dev/null 2>&1; then
+    local out rc=0 parked
+    out="$(REALITY_REPAIR_WAIT=1 reality_repair_inbounds "$rest" 2>&1)" || rc=$?
+    if (( rc == 0 )); then
         local after
         after="$(reality_broken_inbounds "$(api_get_obj "/panel/api/inbounds/list" 2>/dev/null || echo '[]')")"
+        # Inbounds that could not be fixed (no privateKey) get parked disabled.
+        parked="$(printf '%s\n' "$out" | grep -c 'کلید خصوصی REALITY نداشت' || true)"
         if [[ -z "$after" ]]; then
-            bot_reply "$chat" "✅ <b>ترمیم انجام شد</b> — Xray راه‌اندازی مجدد شد و ${count} Inbound سالم شد.
+            local note=""
+            if [[ "${parked:-0}" -gt 0 ]]; then
+                note="
+
+⚠️ <b>${parked}</b> Inbound کلید خصوصی REALITY نداشت و قابل استفاده نبود؛ برای اینکه Xray بتواند استارت بخورد <b>غیرفعال</b> شد. آن‌ها را از پنل حذف کنید."
+            fi
+            bot_reply "$chat" "✅ <b>ترمیم انجام شد</b> — Xray راه‌اندازی مجدد شد و ${count} Inbound سالم شد.${note}
 
 • SNI: <code>${rest:-${VLESS_SNI:-}}</code>
 اکنون /status را ببینید." >/dev/null

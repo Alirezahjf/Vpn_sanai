@@ -429,6 +429,19 @@ bash <(curl -Ls https://raw.githubusercontent.com/Alirezahjf/Vpn_sanai/BRANCH/in
 پر می‌کند، Xray را راه‌اندازی مجدد می‌کند و در پایان سلامت پیکربندی را تأیید می‌کند.
 برای دیدن مشکل بدون تغییر: `vpn-sanai-status --json | jq .reality_issues`.
 
+اگر Inbound **کلید خصوصی (privateKey)** ندارد، REALITY هرگز کار نمی‌کند؛ آن Inbound
+به‌طور خودکار **غیرفعال** (`enable=false`) می‌شود تا Xray بتواند استارت بخورد و
+بقیهٔ Inboundها سالم بمانند. آن‌ها را از پنل حذف کنید.
+
+**فهرست Inboundهای ناقص، بدون تغییر هیچ چیز** (فقط `jq` و `curl`؛ حتی وقتی نسخهٔ
+نصب‌شده قدیمی است کار می‌کند):
+
+```bash
+bash /usr/local/lib/vpn-sanai/scripts/diagnose-reality.sh
+# یا مستقیم از مخزن:
+bash <(curl -Ls https://raw.githubusercontent.com/Alirezahjf/Vpn_sanai/BRANCH/scripts/diagnose-reality.sh)
+```
+
 ترمیم دستی (اگر ترجیح می‌دهید): در پنل → Inbounds → inbound مورد نظر → Stream
 Settings → REALITY → مقدار **serverNames / SNI** را مثلاً `www.microsoft.com`
 بگذارید (و `target` را `www.microsoft.com:443`)، ذخیره کنید و Xray را ری‌استارت کنید.

@@ -239,9 +239,12 @@ it_start() {
 
     # mock panel — credentials mirror the state file below
     local pf; pf="$(mktemp)"
+    local -a panel_seed=()
+    if [[ -n "${IT_PANEL_SEED:-}" ]]; then panel_seed=(--seed "$IT_PANEL_SEED"); fi
     MOCK_PANEL_USER=admin MOCK_PANEL_PASS=panelpass123 \
         python3 "${TEST_DIR}/mock_panel.py" --port 0 --base-path "/secret/" \
-            --token "$MOCK_PANEL_TOKEN" --log "$PANELLOG" >"$pf" 2>/dev/null &
+            --token "$MOCK_PANEL_TOKEN" --log "$PANELLOG" ${panel_seed[@]+"${panel_seed[@]}"} \
+            >"$pf" 2>/dev/null &
     IT_PANEL_PID=$!
     IT_PANEL_PORT=""
     local i
@@ -791,4 +794,56 @@ test_read_env_value_handles_escaped_and_legacy() {
     [[ "$(read_env_value "$f" TG_ADMIN_IDS)" == "8837701608 167514573" ]] \
         || { echo "legacy -> $(read_env_value "$f" TG_ADMIN_IDS)"; rm -rf "$tmp"; return 1; }
     rm -rf "$tmp"
+}
+
+test_it_fix_repairs_broken_reality() {
+    # A panel that stored an inbound without serverNames: xray refuses to start,
+    # every client is offline, and /fix must bring it back.
+    local seed="${VPN_SANAI_TEST_ROOT}/tg-broken-seed.json"
+    cat > "$seed" <<'JSON'
+{"inbounds": [
+  {"id": 5, "remark": "in-26770-tcp", "port": 8443, "protocol": "vless",
+   "settings": {"clients": [{"id": "00000000-0000-0000-0000-000000000001",
+                             "email": "user1", "flow": "xtls-rprx-vision"}]},
+   "streamSettings": {"network": "tcp", "security": "reality",
+     "realitySettings": {"target": "", "serverNames": [], "privateKey": "PRIV=="}},
+   "sniffing": {"enabled": true}}
+]}
+JSON
+
+    IT_PANEL_SEED="$seed" it_start || return 1
+    it_feed_message "$ADMIN_ID" "/fix"
+    it_bot_run
+    it_sent_texts | grep -q "ترمیم انجام شد" || { it_stop; return 1; }
+    it_panel_bodies "/inbounds/update/5" | grep -q '"serverNames":\["www.microsoft.com"\]' \
+        || { it_stop; return 1; }
+    jq -r '.path' "$PANELLOG" | grep -q 'restartXrayService' || { it_stop; return 1; }
+    it_stop
+}
+
+test_it_fix_reports_healthy_panel() {
+    it_start || return 1
+    it_feed_message "$ADMIN_ID" "/fix"
+    it_bot_run
+    it_sent_texts | grep -q "سالم هستند" || { it_stop; return 1; }
+    it_stop
+}
+
+test_it_status_warns_about_broken_reality() {
+    local seed="${VPN_SANAI_TEST_ROOT}/tg-broken-seed.json"
+    cat > "$seed" <<'JSON'
+{"inbounds": [
+  {"id": 5, "remark": "in-26770-tcp", "port": 8443, "protocol": "vless",
+   "settings": {"clients": []},
+   "streamSettings": {"network": "tcp", "security": "reality",
+     "realitySettings": {"target": "", "serverNames": [], "privateKey": "PRIV=="}},
+   "sniffing": {"enabled": true}}
+]}
+JSON
+    IT_PANEL_SEED="$seed" it_start || return 1
+    it_feed_message "$ADMIN_ID" "/status"
+    it_bot_run
+    it_sent_texts | grep -q "REALITY ناقص" || { it_stop; return 1; }
+    it_sent_texts | grep -q "/fix" || { it_stop; return 1; }
+    it_stop
 }

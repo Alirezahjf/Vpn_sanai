@@ -15,8 +15,11 @@ with_mock() {
 
     : > "$MOCK_LOG"
     port_file="$(mktemp)"
+    local -a seed_args=()
+    if [[ -n "${MOCK_SEED:-}" ]]; then seed_args=(--seed "$MOCK_SEED"); fi
     python3 "${TEST_DIR}/mock_panel.py" --port 0 --base-path "${MOCK_BASE_PATH}" \
-        --token "${MOCK_TOKEN}" --log "${MOCK_LOG}" >"$port_file" 2>/dev/null &
+        --token "${MOCK_TOKEN}" --log "$MOCK_LOG" ${seed_args[@]+"${seed_args[@]}"} \
+        >"$port_file" 2>/dev/null &
     pid=$!
 
     port=""
@@ -257,4 +260,88 @@ test_share_addr_update_keeps_panel_links_correct() {
 
 test_cookie_login_fallback() {
     with_mock case_cookie_login || fail "ورود با کوکی/CSRF ناموفق بود"
+}
+
+# --- REALITY doctor / repair (the panel's "empty serverNames" failure) ------
+_seed_reality_breakage() {
+    # The panel does not validate realitySettings, so a server can end up with
+    # an inbound xray refuses to load — which takes every inbound offline.
+    cat > "${VPN_SANAI_TEST_ROOT}/reality-breakage.json" <<'JSON'
+{"inbounds": [
+  {"id": 7, "remark": "healthy", "port": 443, "protocol": "vless",
+   "settings": {"clients": []},
+   "streamSettings": {"network": "tcp", "security": "reality",
+     "realitySettings": {"target": "www.microsoft.com:443",
+                         "serverNames": ["www.microsoft.com"],
+                         "privateKey": "PRIV=="}},
+   "sniffing": {"enabled": true}},
+  {"id": 8, "remark": "broken", "port": 26770, "protocol": "vless",
+   "settings": {"clients": []},
+   "streamSettings": {"network": "tcp", "security": "reality",
+     "realitySettings": {"target": "", "serverNames": [],
+                         "privateKey": "PRIV=="}},
+   "sniffing": {"enabled": true}}
+]}
+JSON
+}
+
+case_broken_inbounds_are_detected() {
+    local list out
+    list="$(api_get_obj "/panel/api/inbounds/list")" || return 1
+    out="$(reality_broken_inbounds "$list")"
+    assert_eq $'8\tserverNames' "$out" "فقط inbound ناقص گزارش شود" || return 1
+}
+
+case_repair_fixes_empty_server_names() {
+    REALITY_REPAIR_WAIT=0
+    reality_repair_inbounds "www.apple.com" || return 1
+
+    local list
+    list="$(api_get_obj "/panel/api/inbounds/list")" || return 1
+    assert_eq "" "$(reality_broken_inbounds "$list")" \
+        "پس از ترمیم نباید Inbound ناقصی بماند" || return 1
+    assert_eq "www.apple.com" \
+        "$(printf '%s' "$list" | jq -r '.[]|select(.id==8)|(.streamSettings|fromjson).realitySettings.serverNames[0]')" \
+        "serverNames ترمیم‌شده" || return 1
+    assert_eq "www.apple.com:443" \
+        "$(printf '%s' "$list" | jq -r '.[]|select(.id==8)|(.streamSettings|fromjson).realitySettings.target')" \
+        "target ترمیم‌شده" || return 1
+    assert_eq "www.microsoft.com" \
+        "$(printf '%s' "$list" | jq -r '.[]|select(.id==7)|(.streamSettings|fromjson).realitySettings.serverNames[0]')" \
+        "inbound سالم دست‌نخورده می‌ماند" || return 1
+    assert_eq "1" "$(mock_reqs "/panel/api/server/restartXrayService" | wc -l | tr -d ' ')" \
+        "xray باید راه‌اندازی مجدد شود" || return 1
+}
+
+case_repair_keeps_healthy_inbounds_alone() {
+    REALITY_REPAIR_WAIT=0
+    reality_repair_inbounds "" || return 1
+    local list
+    list="$(api_get_obj "/panel/api/inbounds/list")" || return 1
+    assert_eq "www.microsoft.com" \
+        "$(printf '%s' "$list" | jq -r '.[]|select(.id==7)|(.streamSettings|fromjson).realitySettings.serverNames[0]')" \
+        "inbound سالم نباید تغییر کند" || return 1
+    assert_eq "0" "$(mock_reqs "/panel/api/inbounds/update" | wc -l | tr -d ' ')" \
+        "هیچ به‌روزرسانی لازم نیست" || return 1
+}
+
+test_broken_reality_inbounds_are_detected() {
+    _seed_reality_breakage
+    MOCK_SEED="${VPN_SANAI_TEST_ROOT}/reality-breakage.json" \
+        with_mock case_broken_inbounds_are_detected \
+        || fail "Inbound با serverNames خالی باید تشخیص داده شود"
+}
+
+test_repair_fixes_empty_server_names() {
+    _seed_reality_breakage
+    MOCK_SEED="${VPN_SANAI_TEST_ROOT}/reality-breakage.json" \
+        with_mock case_repair_fixes_empty_server_names \
+        || fail "ترمیم Inbound ناقص ناموفق بود"
+}
+
+test_repair_leaves_healthy_inbounds_alone() {
+    _seed_reality_breakage
+    MOCK_SEED="${VPN_SANAI_TEST_ROOT}/reality-breakage.json" \
+        with_mock case_repair_keeps_healthy_inbounds_alone \
+        || fail "ترمیم نباید Inbound سالم را تغییر دهد"
 }

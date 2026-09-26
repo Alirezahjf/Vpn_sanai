@@ -163,6 +163,7 @@ vpn-sanai — نصب‌کنندهٔ پنل 3x-ui + VLESS/REALITY
 
 عملیات:
   --status                 نمایش وضعیت نصب
+  --fix-reality            ترمیم Inboundهای REALITY ناقص (serverNames خالی) و راه‌اندازی مجدد Xray
   --add-client EMAIL       افزودن کلاینت و نمایش لینک/QR
   --show-clients           نمایش لینک/QR همهٔ کلاینت‌ها
   --backup                 پشتیبان‌گیری دستی
@@ -207,7 +208,8 @@ parse_args() {
             --restore)         ACTION="restore"; RESTORE_FILE="${2:?}"; shift 2 ;;
             --ssh-finalize)    ACTION="ssh-finalize"; shift ;;
             --status)          ACTION="status"; shift ;;
-            --show-clients)    ACTION="show-clients"; shift ;;
+            --fix-reality)     ACTION="fix-reality"; shift ;;
+            --show-clients)   ACTION="show-clients"; shift ;;
             --backup)          ACTION="backup"; shift ;;
             --update-panel)    ACTION="update-panel"; shift ;;
             --uninstall)       ACTION="uninstall"; shift ;;
@@ -926,6 +928,7 @@ show_status() {
     fi
     kv "پورت VLESS" "$(state_get VLESS_PORT '?')"
     kv "SNI" "$(state_get VLESS_SNI '?')"
+    reality_health_warning
     kv "کلاینت پیش‌فرض" "$(state_get DEFAULT_CLIENT_EMAIL '?')"
     kv "state" "$VPN_SANAI_STATE_FILE"
     if panel_installed; then
@@ -937,6 +940,25 @@ show_status() {
     fi
     backup_status
     security_summary 2>/dev/null || true
+}
+
+# action_fix_reality -> repair REALITY inbounds the panel stored with an empty
+# serverNames. Xray refuses to load such a config, which shows up in the panel
+# as "Xray خطا" with `empty "serverNames"` in the logs and takes every inbound
+# (and therefore every client) offline.
+action_fix_reality() {
+    state_load || die "ابتدا نصب را اجرا کنید"
+    PANEL_PORT="${PANEL_PORT:-$(state_get PANEL_PORT)}"
+    PANEL_BASE_PATH="$(state_get PANEL_BASE_PATH '/')"
+    PANEL_API_TOKEN="${PANEL_API_TOKEN:-$(state_get PANEL_API_TOKEN)}"
+    PANEL_SCHEME="${PANEL_SCHEME:-$(state_get PANEL_SCHEME http)}"
+    SERVER_IP="${SERVER_IP:-$(state_get SERVER_IP)}"
+    VLESS_SNI="${VLESS_SNI:-$(state_get VLESS_SNI)}"
+    detect_platform
+    api_is_authenticated 2>/dev/null || die "اتصال به API پنل برقرار نشد (پنل بالا است؟)"
+
+    log_step "بررسی و ترمیم Inboundهای REALITY"
+    reality_repair_inbounds "${VLESS_SNI_CHOICE:-}" || exit 1
 }
 
 action_add_client() {
@@ -1076,8 +1098,8 @@ action_menu() {
     print_rule "منوی مدیریت vpn-sanai"
     local choice=""
     local -a options=("نمایش وضعیت" "افزودن کلاینت" "نمایش لینک و QR" "پشتیبان‌گیری" \
-                      "نهایی‌سازی پورت SSH" "به‌روزرسانی پنل" "اجرای مجدد پیکربندی" \
-                      "تنظیم ربات تلگرام" "حذف نصب" "خروج")
+                      "ترمیم REALITY" "نهایی‌سازی پورت SSH" "به‌روزرسانی پنل" \
+                      "اجرای مجدد پیکربندی" "تنظیم ربات تلگرام" "حذف نصب" "خروج")
     if ((VPN_SANAI_NONINTERACTIVE)) || [[ ! -t 0 ]]; then
         show_status
         return 0
@@ -1092,11 +1114,12 @@ action_menu() {
         2) ask email "نام کلاینت" "user$(rand_string 4 '0-9')"; action_add_client "$email" ;;
         3) action_show_clients ;;
         4) state_load; backup_create "manual" ;;
-        5) state_load; ssh_finalize ;;
-        6) action_update_panel ;;
-        7) do_full_install ;;
-        8) action_telegram ;;
-        9) action_uninstall ;;
+        5) action_fix_reality ;;
+        6) state_load; ssh_finalize ;;
+        7) action_update_panel ;;
+        8) do_full_install ;;
+        9) action_telegram ;;
+        10) action_uninstall ;;
         *) log_info "خروج" ;;
     esac
 }
@@ -1135,6 +1158,7 @@ main() {
             ;;
         add-client)    action_add_client "${CLIENT_EMAILS[0]}" ;;
         show-clients)  action_show_clients ;;
+        fix-reality)   action_fix_reality ;;
         status)        show_status ;;
         backup)        backup_create "manual"; backup_prune ;;
         restore)       backup_restore "${RESTORE_FILE:-}" ;;

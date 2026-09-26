@@ -263,3 +263,82 @@ test_panel_placeholder_secrets_healed() {
         ((PANEL_HEALED_CREDS == 0 && PANEL_HEALED_BASE == 0)) || { echo "false positive heal"; return 1; }
     ) || fail "مقادیر placeholder باید ترمیم و مقادیر سالم دست‌نخورده بمانند"
 }
+
+test_help_documents_the_new_flags() {
+    local out
+    out="$(bash "$INSTALL" --help)"
+    assert_contains "$out" "--fix-reality"  "راهنما باید --fix-reality را داشته باشد" || return 1
+    assert_contains "$out" "--update-self"  "راهنما باید --update-self را داشته باشد" || return 1
+    return 0
+}
+
+test_self_update_files_cover_the_whole_tree() {
+    local -a files=()
+    mapfile -t files < <(VPN_SANAI_NO_MAIN=1 bash -c '
+        source "'"$TEST_DIR"'/../install.sh" >/dev/null 2>&1 || true
+        _self_update_files') || true
+    ((${#files[@]} > 15)) || { fail "فهرست فایل‌های به‌روزرسانی خالی است"; return 1; }
+    local f
+    for f in install.sh lib/bootstrap.sh lib/reality.sh lib/bot.sh lib/load.sh \
+             scripts/status.sh scripts/telegram-bot.sh config/defaults.conf; do
+        printf '%s\n' "${files[@]}" | grep -qx "$f" || { fail "${f} در فهرست به‌روزرسانی نیست"; return 1; }
+    done
+    return 0
+}
+
+test_self_update_fetch_from_local_mirror() {
+    # CI has no GitHub: serve this checkout over HTTP and point the downloader
+    # at it through VPN_SANAI_UPDATE_URL (the same knob a restricted network uses).
+    local dir="$VPN_SANAI_TEST_ROOT/mirror" port=18099 pid tmp i
+    mkdir -p "$dir"
+    cp -a "$ROOT_DIR/lib" "$ROOT_DIR/config" "$ROOT_DIR/scripts" "$ROOT_DIR/install.sh" "$dir/"
+    ( cd "$dir" && python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1 ) &
+    pid=$!
+    for i in $(seq 1 40); do
+        curl -sf -o /dev/null "http://127.0.0.1:${port}/install.sh" 2>/dev/null && break
+        sleep 0.1
+    done
+
+    tmp="$VPN_SANAI_TEST_ROOT/fetched"
+    rm -rf "$tmp"
+    # _self_update_fetch lives in install.sh, so run it the way the CLI does
+    VPN_SANAI_NO_MAIN=1 VPN_SANAI_UPDATE_URL="http://127.0.0.1:${port}" bash -c '
+        source "'"$TEST_DIR"'/../install.sh" >/dev/null 2>&1 || true
+        _self_update_fetch "main" "$1"' _ "$tmp" >/dev/null 2>&1 || {
+        kill "$pid" 2>/dev/null || true
+        fail "دانلود از آینهٔ محلی ناموفق بود"
+        return 1
+    }
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    [[ -s "$tmp/install.sh" ]] || { rm -rf "$tmp"; fail "install.sh دانلود نشد"; return 1; }
+    [[ -s "$tmp/lib/reality.sh" ]] || { rm -rf "$tmp"; fail "lib/reality.sh دانلود نشد"; return 1; }
+    [[ -s "$tmp/scripts/telegram-bot.sh" ]] || { rm -rf "$tmp"; fail "scripts/telegram-bot.sh دانلود نشد"; return 1; }
+    grep -q "reality_repair_inbounds" "$tmp/lib/reality.sh" || { rm -rf "$tmp"; fail "محتوای دانلودشده درست نیست"; return 1; }
+    rm -rf "$tmp"
+    return 0
+}
+
+test_self_update_fetch_fails_without_touching_anything() {
+    local tmp="$VPN_SANAI_TEST_ROOT/fetched-bad"
+    rm -rf "$tmp"
+    if VPN_SANAI_NO_MAIN=1 VPN_SANAI_UPDATE_URL="http://127.0.0.1:1" bash -c '
+        source "'"$TEST_DIR"'/../install.sh" >/dev/null 2>&1 || true
+        _self_update_fetch "nope" "$1"' _ "$tmp" >/dev/null 2>&1; then
+        rm -rf "$tmp"
+        fail "دانلود از آینهٔ ناموجود باید شکست بخورد"
+        return 1
+    fi
+    rm -rf "$tmp"
+    return 0
+}
+
+test_self_update_dry_run_changes_nothing() {
+    local out status=0
+    out="$(VPN_SANAI_DRY_RUN=1 VPN_SANAI_NO_MAIN=1 bash -c '
+        source "'"$TEST_DIR"'/../install.sh" >/dev/null 2>&1 || true
+        action_self_update "main"' 2>&1)" || status=$?
+    assert_contains "$out" "dry-run" "حالت dry-run باید اعلام شود" || return 1
+    return 0
+}

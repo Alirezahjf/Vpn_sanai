@@ -342,3 +342,22 @@ test_self_update_dry_run_changes_nothing() {
     assert_contains "$out" "dry-run" "حالت dry-run باید اعلام شود" || return 1
     return 0
 }
+
+test_update_self_accepts_a_ref() {
+    # The fix lives on the branch, not on main: `--update-self BRANCH` must pass
+    # the ref to the downloader instead of falling back to main.
+    local out
+    out="$(VPN_SANAI_NO_MAIN=1 bash -c '
+        source "'"$TEST_DIR"'/../install.sh" >/dev/null 2>&1 || true
+        ACTION=""
+        parse_args --update-self arena-branch
+        printf "%s|%s\n" "$ACTION" "${SELF_UPDATE_REF:-unset}"
+        ACTION=""; SELF_UPDATE_REF=""
+        parse_args --update-self
+        printf "%s|%s\n" "$ACTION" "${SELF_UPDATE_REF:-unset}"' 2>/dev/null || true)"
+    assert_contains "$out" "update-self|arena-branch" \
+        "--update-self BRANCH باید ref را بگیرد" || return 1
+    assert_contains "$out" "update-self|unset" \
+        "--update-self بدون آرگومان هم باید کار کند" || return 1
+    return 0
+}

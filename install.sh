@@ -239,7 +239,16 @@ parse_args() {
             --quiet)           VPN_SANAI_QUIET=1; shift ;;
             -h|--help)         usage; exit 0 ;;
             -V|--version)      printf '%s %s\n' "$VPN_SANAI_NAME" "$VPN_SANAI_VERSION"; exit 0 ;;
-            *)                 log_error "گزینهٔ ناشناخته: $1"; usage; exit 2 ;;
+            *)                 if [[ "$1" == "--update-self" ]]; then
+                                    # The running copy predates the self-update
+                                    # action (e.g. it came from the default
+                                    # `main` ref, which has not merged it yet).
+                                    log_error "این نسخه از install.sh گزینهٔ --update-self را ندارد."
+                                    log_error "اگر از GitHub اجرا می‌کنید، ref را هم بدهید:"
+                                    log_error "  bash <(curl -Ls https://raw.githubusercontent.com/Alirezahjf/Vpn_sanai/BRANCH/install.sh) --update-self BRANCH"
+                                    exit 2
+                                fi
+                                log_error "گزینهٔ ناشناخته: $1"; usage; exit 2 ;;
         esac
     done
     ((ASSUME_YES)) && VPN_SANAI_NONINTERACTIVE=1

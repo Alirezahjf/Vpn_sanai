@@ -495,7 +495,13 @@ require_root() {
     fi
     if has_cmd sudo; then
         log_warn "دسترسی root لازم است؛ اسکریپت با sudo دوباره اجرا می‌شود"
-        exec sudo --preserve-env=VPN_SANAI_NONINTERACTIVE,VPN_SANAI_DRY_RUN,VPN_SANAI_DEBUG \
+        # Keep the knobs that change where files come from and how they are
+        # written: without them a restricted network loses its mirror
+        # (VPN_SANAI_UPDATE_URL) the moment sudo scrubs the environment.
+        exec sudo --preserve-env=VPN_SANAI_NONINTERACTIVE,VPN_SANAI_DRY_RUN,VPN_SANAI_DEBUG,\
+VPN_SANAI_UPDATE_URL,VPN_SANAI_REPO,VPN_SANAI_REF,VPN_SANAI_QUIET,\
+VPN_SANAI_ETC,VPN_SANAI_STATE_FILE,VPN_SANAI_LOG_DIR,VPN_SANAI_BACKUP_DIR,\
+VPN_SANAI_LIBEXEC,VPN_SANAI_LINKS_DIR,VPN_SANAI_REPORT_FILE,VPN_SANAI_NO_MAIN \
             bash "${VPN_SANAI_SELF:-$0}" "$@"
     fi
     die "برای اجرا به دسترسی root نیاز است (sudo نصب نیست)"

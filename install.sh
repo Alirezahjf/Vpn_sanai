@@ -48,16 +48,36 @@ elif [[ ! -f "${LIB_DIR}/common.sh" ]]; then
     # overrides the bootstrap module uses (default stays main).
     VPN_SANAI_REPO="${VPN_SANAI_REPO:-Alirezahjf/Vpn_sanai}"
     VPN_SANAI_REF="${VPN_SANAI_REF:-main}"
+    # `--update-self REF` names the ref the caller wants. When the tree is
+    # fetched from the default ref it may not contain the flag at all (the
+    # feature simply is not on main yet), so an explicit ref has to be honoured
+    # here — before anything is downloaded.
+    _prev=""
+    for _arg in "$@"; do
+        if [[ "$_prev" == "--update-self" && "$_arg" != -* ]]; then
+            VPN_SANAI_REF="$_arg"
+            break
+        fi
+        _prev="$_arg"
+    done
     export VPN_SANAI_REPO VPN_SANAI_REF
     printf '[vpn-sanai] فایل‌های پروژه پیدا نشد؛ از GitHub دانلود می‌شوند (repo=%s ref=%s)...\n' \
         "$VPN_SANAI_REPO" "$VPN_SANAI_REF" >&2
     _tmpdir="$(mktemp -d /tmp/vpn-sanai-bootstrap.XXXXXX)"
     _ok=0
-    for _url in \
-        "https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh" \
-        "https://cdn.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh" \
-        "https://gcore.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh" \
-        "https://ghproxy.net/https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh"; do
+    # A restricted network can point at its own mirror with
+    # VPN_SANAI_UPDATE_URL; otherwise fall back to the public mirrors.
+    _urls=()
+    if [[ -n "${VPN_SANAI_UPDATE_URL:-}" ]]; then
+        _urls+=("${VPN_SANAI_UPDATE_URL}/lib/bootstrap.sh")
+    fi
+    _urls+=(
+        "https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh"
+        "https://cdn.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh"
+        "https://gcore.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh"
+        "https://ghproxy.net/https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh"
+    )
+    for _url in "${_urls[@]}"; do
         if curl -fsSL --connect-timeout 15 --retry 2 --max-time 60 \
                 -o "${_tmpdir}/bootstrap.sh" "$_url" 2>/dev/null && [[ -s "${_tmpdir}/bootstrap.sh" ]]; then
             _ok=1

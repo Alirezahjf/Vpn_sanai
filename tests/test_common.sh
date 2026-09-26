@@ -197,3 +197,25 @@ test_atomic_write_guarantees_trailing_newline() {
     rm -f "$f"
     [[ "$last" == "B=2" ]] || fail "خط آخر نباید چسبیده باشد: ${last}"
 }
+
+test_bootstrap_detects_a_missing_ref() {
+    # Asking for --update-self against a ref that does not have it must say so
+    # instead of dumping the usage screen (which reads like a typo).
+    # shellcheck source=../lib/load.sh
+    source "${ROOT_DIR}/lib/load.sh" >/dev/null 2>&1 || true
+    source "${ROOT_DIR}/lib/bootstrap.sh" >/dev/null 2>&1 || true
+
+    local stripped="$VPN_SANAI_TEST_ROOT/old-install.sh"
+    grep -v -- "--update-self" "${ROOT_DIR}/install.sh" > "$stripped"
+
+    if _bootstrap_ref_mismatch "$stripped" --update-self; then :; else
+        fail "نسخهٔ بدون --update-self باید تشخیص داده شود"; return 1
+    fi
+    if _bootstrap_ref_mismatch "$stripped" --status; then
+        fail "--status نباید به‌اشتباه ناسازگار شمرده شود"; return 1
+    fi
+    if _bootstrap_ref_mismatch "${ROOT_DIR}/install.sh" --update-self --fix-reality; then
+        fail "نسخهٔ کامل نباید ناسازگار شمرده شود"; return 1
+    fi
+    return 0
+}

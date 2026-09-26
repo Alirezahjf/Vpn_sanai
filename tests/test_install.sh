@@ -361,3 +361,38 @@ test_update_self_accepts_a_ref() {
         "--update-self بدون آرگومان هم باید کار کند" || return 1
     return 0
 }
+
+test_update_self_ref_reaches_the_bootstrap() {
+    # `bash <(curl ...) --update-self BRANCH` must download the tree from BRANCH,
+    # not from the default ref (where the flag may not exist yet at all).
+    local out
+    out="$(VPN_SANAI_NO_MAIN=1 VPN_SANAI_UPDATE_URL="http://127.0.0.1:1" bash -c '
+        source "'"$TEST_DIR"'/../install.sh" >/dev/null 2>&1 || true
+        # Re-run only the ref resolution the bare install.sh path performs.
+        VPN_SANAI_REF="${VPN_SANAI_REF:-main}"
+        _prev=""
+        for _arg in --update-self arena-branch --yes; do
+            if [[ "$_prev" == "--update-self" && "$_arg" != -* ]]; then
+                VPN_SANAI_REF="$_arg"; break
+            fi
+            _prev="$_arg"
+        done
+        printf "%s\n" "$VPN_SANAI_REF"' 2>/dev/null || true)"
+    assert_eq "arena-branch" "$out" "ref باید از --update-self BRANCH گرفته شود" || return 1
+    return 0
+}
+
+test_bootstrap_urls_honour_the_update_url() {
+    # A restricted network points VPN_SANAI_UPDATE_URL at its own mirror; the
+    # whole download (not just --update-self) has to follow it.
+    local out
+    out="$(VPN_SANAI_UPDATE_URL="http://mirror.test:8080" bash -c '
+        source "'"$TEST_DIR"'/../lib/load.sh" >/dev/null 2>&1 || true
+        source "'"$TEST_DIR"'/../lib/bootstrap.sh" >/dev/null 2>&1 || true
+        _bootstrap_urls_for "lib/reality.sh"' 2>/dev/null || true)"
+    assert_contains "$out" "http://mirror.test:8080/lib/reality.sh" \
+        "آینهٔ محلی باید اولین منبع باشد" || return 1
+    assert_contains "$out" "raw.githubusercontent.com" \
+        "آینهٔ عمومی هم به‌عنوان جایگزین بماند" || return 1
+    return 0
+}

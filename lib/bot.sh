@@ -462,6 +462,7 @@ bot_handle_message() {
         /start)    bot_menu_main "$chat" "" ;;
         /panel)    bot_menu_panel "$chat" "" ;;
         /status)   bot_send_status "$chat" ;;
+        /fix)      bot_cmd_fix "$chat" "$rest" ;;
         /clients)  bot_menu_clients "$chat" "" ;;
         /security) bot_menu_security "$chat" "" ;;
         /backup)   bot_menu_backup "$chat" "" ;;
@@ -1272,6 +1273,19 @@ bot_build_status_html() {
     last_backup="$(backup_list 2>/dev/null | head -1 | awk '{print $1, $2}')"
     text+=$'\n'"💾 آخرین پشتیبان: ${last_backup:-ندارد}"
     text+=$'\n'"🔒 UFW: $(ufw_is_active 2>/dev/null && echo 'فعال' || echo 'غیرفعال') — BBR: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')"
+
+    # One inbound without serverNames keeps xray from starting, so every client
+    # is offline while the panel itself looks perfectly healthy.
+    local issues
+    issues="$(reality_broken_inbounds "$inbounds")"
+    if [[ -n "$issues" ]]; then
+        text+=$'\n'$'\n'"⚠️ <b>REALITY ناقص</b> — Xray استارت نمی‌خورد:"
+        while IFS=$'\t' read -r iid iproblem; do
+            [[ -n "$iid" ]] || continue
+            text+=$'\n'"• Inbound <code>${iid}</code> — ${iproblem}"
+        done <<< "$issues"
+        text+=$'\n'"برای ترمیم: /fix"
+    fi
     printf '%s' "$text"
 }
 
@@ -1934,6 +1948,58 @@ bot_action_backup_prune() {
     fi
 }
 
+# --- reality repair ---------------------------------------------------------------------------------
+
+# bot_cmd_fix [sni] -> repair REALITY inbounds the panel stored without
+# serverNames. Xray rejects the whole config in that state, so every client is
+# offline even though the panel itself is up; this is the fastest way back.
+bot_cmd_fix() {
+    local chat="$1" rest="${2:-}"
+    if ! bot_panel_ready; then bot_err_reply "$chat"; return 0; fi
+
+    local list before
+    list="$(api_get_obj "/panel/api/inbounds/list" 2>/dev/null || echo '[]')"
+    before="$(reality_broken_inbounds "$list")"
+
+    if [[ -z "$before" ]]; then
+        bot_reply "$chat" "✅ همهٔ Inboundهای REALITY سالم هستند؛ کاری لازم نبود." >/dev/null
+        return 0
+    fi
+
+    local count
+    count="$(printf '%s\n' "$before" | grep -c . || true)"
+    tg_chat_action "$chat" typing >/dev/null 2>&1 || true
+    bot_reply "$chat" "🔧 ${count} Inbound REALITY ناقص پیدا شد — در حال ترمیم…" >/dev/null 2>&1 || true
+
+    local out rc=0 parked
+    out="$(REALITY_REPAIR_WAIT=1 reality_repair_inbounds "$rest" 2>&1)" || rc=$?
+    if (( rc == 0 )); then
+        local after
+        after="$(reality_broken_inbounds "$(api_get_obj "/panel/api/inbounds/list" 2>/dev/null || echo '[]')")"
+        # Inbounds that could not be fixed (no privateKey) get parked disabled.
+        parked="$(printf '%s\n' "$out" | grep -c 'کلید خصوصی REALITY نداشت' || true)"
+        if [[ -z "$after" ]]; then
+            local note=""
+            if [[ "${parked:-0}" -gt 0 ]]; then
+                note="
+
+⚠️ <b>${parked}</b> Inbound کلید خصوصی REALITY نداشت و قابل استفاده نبود؛ برای اینکه Xray بتواند استارت بخورد <b>غیرفعال</b> شد. آن‌ها را از پنل حذف کنید."
+            fi
+            bot_reply "$chat" "✅ <b>ترمیم انجام شد</b> — Xray راه‌اندازی مجدد شد و ${count} Inbound سالم شد.${note}
+
+• SNI: <code>${rest:-${VLESS_SNI:-}}</code>
+اکنون /status را ببینید." >/dev/null
+        else
+            bot_reply "$chat" "⚠️ ترمیم انجام شد ولی Xray هنوز پیکربندی را قبول نمی‌کند:
+<code>$(printf '%s' "$after" | tr '\t' ' ' | tr '\n' ' ')</code>" >/dev/null
+        fi
+    else
+        bot_reply "$chat" "❌ ترمیم ناموفق بود. لاگ سرور را ببینید:
+<code>journalctl -u x-ui -n 50 --no-pager</code>" >/dev/null
+    fi
+    return 0
+}
+
 # --- help --------------------------------------------------------------------------------------------
 
 bot_send_help() {
@@ -1945,6 +2011,7 @@ bot_send_help() {
 /start — منوی اصلی
 /panel — مدیریت پنل سنایی (لینک ورود، ری‌استارت، رمز)
 /status — وضعیت سرور و پنل
+/fix — ترمیم Inboundهای REALITY ناقص (وقتی Xray بالا نمی‌آید)
 /clients — مدیریت کلاینت‌ها
 /add [نام] [روز] [گیگ] [ip] — ساخت سریع کلاینت
 /link نام — ارسال لینک و QR کلاینت

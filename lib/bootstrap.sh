@@ -20,6 +20,10 @@ VPN_SANAI_REF="${VPN_SANAI_REF:-main}"
 
 _bootstrap_files=(
     "install.sh"
+    # bootstrap.sh itself: the one-liner path fetches it separately, but the
+    # tree this list produces must be complete, otherwise --update-self cannot
+    # resolve the module (and the downloader aborts) when run from curl|bash.
+    "lib/bootstrap.sh"
     "lib/common.sh"
     "lib/preflight.sh"
     "lib/api.sh"
@@ -38,12 +42,17 @@ _bootstrap_files=(
     "scripts/backup.sh"
     "scripts/security.sh"
     "scripts/status.sh"
+    "scripts/diagnose-reality.sh"
     "scripts/uninstall.sh"
     "scripts/telegram-bot.sh"
 )
 
 _bootstrap_urls_for() { # <relative-path> -> mirrors, one per line
     local path="$1"
+    # A restricted network can point the whole download at its own mirror.
+    if [[ -n "${VPN_SANAI_UPDATE_URL:-}" ]]; then
+        printf '%s\n' "${VPN_SANAI_UPDATE_URL%/}/${path}"
+    fi
     printf '%s\n' \
         "https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/${path}" \
         "https://cdn.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/${path}" \
@@ -94,7 +103,37 @@ bootstrap_self() {
     done
 
     chmod +x "${tmp_dir}/install.sh" "${tmp_dir}"/scripts/*.sh 2>/dev/null || true
+
+    # Asking for a flag the downloaded copy does not have means we pulled the
+    # wrong ref — the default `main` may simply not carry that feature yet. Say
+    # so plainly: a bare usage screen reads like a typo and sends people in
+    # circles (it looks like the flag is misspelled).
+    if _bootstrap_ref_mismatch "${tmp_dir}/install.sh" "$@"; then
+        printf '\033[31m[vpn-sanai]\033[0m این دستور در ref «%s» وجود ندارد.\n' \
+            "$VPN_SANAI_REF" >&2
+        printf '           ref درست را با VPN_SANAI_REF بدهید، مثلاً:\n' >&2
+        printf '           VPN_SANAI_REF=<branch> bash <(curl -Ls https://raw.githubusercontent.com/%s/<branch>/install.sh) %s\n' \
+            "$VPN_SANAI_REPO" "$1" >&2
+        rm -rf "$tmp_dir"
+        exit 2
+    fi
+
     printf '\033[32m[vpn-sanai]\033[0m دانلود کامل شد؛ اجرای نسخهٔ دانلودشده...\n\n' >&2
 
     exec bash "${tmp_dir}/install.sh" "$@"
+}
+
+# _bootstrap_ref_mismatch <install.sh> <args...> -> 0 when an argument names a
+# feature the downloaded copy does not implement (wrong ref).
+_bootstrap_ref_mismatch() {
+    local script="$1"; shift
+    [[ -s "$script" ]] || return 1
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --update-self|--fix-reality)
+                grep -q -- "$arg" "$script" || return 0 ;;
+        esac
+    done
+    return 1
 }

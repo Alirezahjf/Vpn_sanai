@@ -42,6 +42,8 @@
 | **همگام‌سازی ساعت** | مهم برای REALITY (اختلاف ساعت باعث شکست دست‌دادن می‌شود) |
 | **پشتیبان‌گیری** | پشتیبان روزانهٔ دیتابیس + state + گواهی‌ها (cron) با نگهداری ۱۴ روز |
 | **منوی مدیریت** | دستور `vpn-sanai` برای وضعیت، افزودن کلاینت، پشتیبان‌گیری، به‌روزرسانی و حذف |
+| **پزشک REALITY** | تشخیص و ترمیم خودکار Inboundهای ناقص (`serverNames` خالی) که Xray را استارت نمی‌کند — با `--fix-reality` یا از منو |
+| **به‌روزرسانی ایمن** | `--update-self` فقط ابزار را عوض می‌کند (پشتیبان از نسخهٔ قبلی + ری‌استارت ربات) و دیتابیس پنل، Inboundها و state دست‌نخورده می‌مانند |
 | **ربات تلگرام** | مدیریت کامل سرور از تلگرام: کلاینت‌ها، تنظیمات و لینک پنل، امنیت، پشتیبان — با احراز هویت مدیران، حذف خودکار پیام‌های محرمانه و گزارش روزانه |
 | **امنیت اجرا** | `set -Eeuo pipefail`، قفل اجرای هم‌زمان، trap خطا، لاگ کامل، حالت `--dry-run` |
 
@@ -292,6 +294,8 @@ bash install.sh [گزینهها]
 --no-ufw --no-fail2ban --no-bbr --no-sysctl --no-timesync --no-backup
 
 --status                 وضعیت نصب
+--fix-reality            ترمیم Inboundهای REALITY ناقص (serverNames خالی) + ری‌استارت Xray
+--update-self [REF]      به‌روزرسانی خود ابزار + ترمیم REALITY (بدون دست‌زدن به دیتابیس/Inboundها)
 --add-client EMAIL       افزودن کلاینت
 --show-clients           لینک/QR همهٔ کلاینتها
 --backup                 پشتیبانگیری دستی
@@ -383,6 +387,64 @@ tests/                  تست‌های خودکار + پنل و ربات شبی
 
 اسکریپت خودش پورت آزاد انتخاب می‌کند و در گزارش می‌نویسد. برای انتخاب دستی: `--vless-port 8443`.
 اگر می‌خواهید ۴۴۳ را آزاد کنید: `ss -tlnp | grep :443` و سرویس متخاصم را ببندید.
+
+</details>
+
+<details>
+<summary><b>پنل خطای <code>empty "serverNames"</code> می‌دهد و Xray بالا نمی‌آید</b></summary>
+
+در لاگ پنل (`journalctl -u x-ui -n 50 --no-pager`) چنین خطایی می‌بینید:
+
+```
+XRAY: Failed to start: main: failed to load config files: [bin/config.json]
+  > infra/conf: failed to build inbound config with tag in-XXXXX-tcp
+  > infra/conf: Failed to build REALITY config. > infra/conf: empty "serverNames"
+```
+
+یعنی یک Inbound REALITY بدون `serverNames` (SNI) ذخیره شده است. پنل این مقدار را
+اعتبارسنجی **نمی‌کند**، ولی Xray کل پیکربندی را رد می‌کند — به همین خاطر با یک
+Inbound خراب، **همهٔ** Inboundها و کلاینت‌ها از کار می‌افتند (badge قرمز «Xray خطا»).
+
+ترمیم با یک دستور:
+
+```bash
+vpn-sanai --fix-reality              # یا گزینهٔ «ترمیم REALITY» در منو
+vpn-sanai --fix-reality --sni www.microsoft.com   # انتخاب دستی SNI
+```
+
+اگر نسخهٔ نصب‌شدهٔ ابزار قدیمی است (دستور را نمی‌شناسد)، با یک دستور هم
+به‌روزرسانی کنید و هم ترمیم کنید — **دیتابیس پنل، Inboundها و کلاینت‌ها
+دست‌نخورده می‌مانند** (فقط `/usr/local/lib/vpn-sanai` عوض می‌شود و از نسخهٔ
+قبیلاً پشتیبان گرفته می‌شود):
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/Alirezahjf/Vpn_sanai/BRANCH/install.sh) --update-self
+# روی سرور محدود: export VPN_SANAI_UPDATE_URL=https://cdn.jsdelivr.net/gh/Alirezahjf/Vpn_sanai@BRANCH
+```
+
+ربات تلگرام هم با همین به‌روزرسانی دستور `/fix` را می‌گیرد (سرویس
+`vpn-sanai-telegram` خودکار ری‌استارت می‌شود).
+
+این دستور همهٔ Inboundهای REALITY را بررسی می‌کند، `serverNames`/`target` خراب را
+پر می‌کند، Xray را راه‌اندازی مجدد می‌کند و در پایان سلامت پیکربندی را تأیید می‌کند.
+برای دیدن مشکل بدون تغییر: `vpn-sanai-status --json | jq .reality_issues`.
+
+اگر Inbound **کلید خصوصی (privateKey)** ندارد، REALITY هرگز کار نمی‌کند؛ آن Inbound
+به‌طور خودکار **غیرفعال** (`enable=false`) می‌شود تا Xray بتواند استارت بخورد و
+بقیهٔ Inboundها سالم بمانند. آن‌ها را از پنل حذف کنید.
+
+**فهرست Inboundهای ناقص، بدون تغییر هیچ چیز** (فقط `jq` و `curl`؛ حتی وقتی نسخهٔ
+نصب‌شده قدیمی است کار می‌کند):
+
+```bash
+bash /usr/local/lib/vpn-sanai/scripts/diagnose-reality.sh
+# یا مستقیم از مخزن:
+bash <(curl -Ls https://raw.githubusercontent.com/Alirezahjf/Vpn_sanai/BRANCH/scripts/diagnose-reality.sh)
+```
+
+ترمیم دستی (اگر ترجیح می‌دهید): در پنل → Inbounds → inbound مورد نظر → Stream
+Settings → REALITY → مقدار **serverNames / SNI** را مثلاً `www.microsoft.com`
+بگذارید (و `target` را `www.microsoft.com:443`)، ذخیره کنید و Xray را ری‌استارت کنید.
 
 </details>
 

@@ -48,16 +48,36 @@ elif [[ ! -f "${LIB_DIR}/common.sh" ]]; then
     # overrides the bootstrap module uses (default stays main).
     VPN_SANAI_REPO="${VPN_SANAI_REPO:-Alirezahjf/Vpn_sanai}"
     VPN_SANAI_REF="${VPN_SANAI_REF:-main}"
+    # `--update-self REF` names the ref the caller wants. When the tree is
+    # fetched from the default ref it may not contain the flag at all (the
+    # feature simply is not on main yet), so an explicit ref has to be honoured
+    # here — before anything is downloaded.
+    _prev=""
+    for _arg in "$@"; do
+        if [[ "$_prev" == "--update-self" && "$_arg" != -* ]]; then
+            VPN_SANAI_REF="$_arg"
+            break
+        fi
+        _prev="$_arg"
+    done
     export VPN_SANAI_REPO VPN_SANAI_REF
     printf '[vpn-sanai] فایل‌های پروژه پیدا نشد؛ از GitHub دانلود می‌شوند (repo=%s ref=%s)...\n' \
         "$VPN_SANAI_REPO" "$VPN_SANAI_REF" >&2
     _tmpdir="$(mktemp -d /tmp/vpn-sanai-bootstrap.XXXXXX)"
     _ok=0
-    for _url in \
-        "https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh" \
-        "https://cdn.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh" \
-        "https://gcore.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh" \
-        "https://ghproxy.net/https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh"; do
+    # A restricted network can point at its own mirror with
+    # VPN_SANAI_UPDATE_URL; otherwise fall back to the public mirrors.
+    _urls=()
+    if [[ -n "${VPN_SANAI_UPDATE_URL:-}" ]]; then
+        _urls+=("${VPN_SANAI_UPDATE_URL}/lib/bootstrap.sh")
+    fi
+    _urls+=(
+        "https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh"
+        "https://cdn.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh"
+        "https://gcore.jsdelivr.net/gh/${VPN_SANAI_REPO}@${VPN_SANAI_REF}/lib/bootstrap.sh"
+        "https://ghproxy.net/https://raw.githubusercontent.com/${VPN_SANAI_REPO}/${VPN_SANAI_REF}/lib/bootstrap.sh"
+    )
+    for _url in "${_urls[@]}"; do
         if curl -fsSL --connect-timeout 15 --retry 2 --max-time 60 \
                 -o "${_tmpdir}/bootstrap.sh" "$_url" 2>/dev/null && [[ -s "${_tmpdir}/bootstrap.sh" ]]; then
             _ok=1
@@ -97,6 +117,7 @@ source "${LIB_DIR}/backup.sh"
 
 # --- runtime configuration ---------------------------------------------------
 ACTION="install"
+SELF_UPDATE_REF=""
 PANEL_PORT=""
 PANEL_BASE_PATH_RAW=""
 PANEL_USER=""
@@ -163,6 +184,8 @@ vpn-sanai — نصب‌کنندهٔ پنل 3x-ui + VLESS/REALITY
 
 عملیات:
   --status                 نمایش وضعیت نصب
+  --fix-reality            ترمیم Inboundهای REALITY ناقص (serverNames خالی) و راه‌اندازی مجدد Xray
+  --update-self [REF]      به‌روزرسانی خود ابزار + ترمیم REALITY (دیتابیس و Inboundها دست‌نخورده می‌مانند)
   --add-client EMAIL       افزودن کلاینت و نمایش لینک/QR
   --show-clients           نمایش لینک/QR همهٔ کلاینت‌ها
   --backup                 پشتیبان‌گیری دستی
@@ -207,7 +230,14 @@ parse_args() {
             --restore)         ACTION="restore"; RESTORE_FILE="${2:?}"; shift 2 ;;
             --ssh-finalize)    ACTION="ssh-finalize"; shift ;;
             --status)          ACTION="status"; shift ;;
-            --show-clients)    ACTION="show-clients"; shift ;;
+            --fix-reality)     ACTION="fix-reality"; shift ;;
+            --update-self)     ACTION="update-self"
+                              if [[ $# -ge 2 && "$2" != -* ]]; then
+                                  SELF_UPDATE_REF="$2"; shift 2
+                              else
+                                  shift
+                              fi ;;
+            --show-clients)   ACTION="show-clients"; shift ;;
             --backup)          ACTION="backup"; shift ;;
             --update-panel)    ACTION="update-panel"; shift ;;
             --uninstall)       ACTION="uninstall"; shift ;;
@@ -229,7 +259,16 @@ parse_args() {
             --quiet)           VPN_SANAI_QUIET=1; shift ;;
             -h|--help)         usage; exit 0 ;;
             -V|--version)      printf '%s %s\n' "$VPN_SANAI_NAME" "$VPN_SANAI_VERSION"; exit 0 ;;
-            *)                 log_error "گزینهٔ ناشناخته: $1"; usage; exit 2 ;;
+            *)                 if [[ "$1" == "--update-self" ]]; then
+                                    # The running copy predates the self-update
+                                    # action (e.g. it came from the default
+                                    # `main` ref, which has not merged it yet).
+                                    log_error "این نسخه از install.sh گزینهٔ --update-self را ندارد."
+                                    log_error "اگر از GitHub اجرا می‌کنید، ref را هم بدهید:"
+                                    log_error "  bash <(curl -Ls https://raw.githubusercontent.com/Alirezahjf/Vpn_sanai/BRANCH/install.sh) --update-self BRANCH"
+                                    exit 2
+                                fi
+                                log_error "گزینهٔ ناشناخته: $1"; usage; exit 2 ;;
         esac
     done
     ((ASSUME_YES)) && VPN_SANAI_NONINTERACTIVE=1
@@ -926,6 +965,7 @@ show_status() {
     fi
     kv "پورت VLESS" "$(state_get VLESS_PORT '?')"
     kv "SNI" "$(state_get VLESS_SNI '?')"
+    reality_health_warning
     kv "کلاینت پیش‌فرض" "$(state_get DEFAULT_CLIENT_EMAIL '?')"
     kv "state" "$VPN_SANAI_STATE_FILE"
     if panel_installed; then
@@ -937,6 +977,176 @@ show_status() {
     fi
     backup_status
     security_summary 2>/dev/null || true
+}
+
+# --- self update -------------------------------------------------------------
+# _self_update_urls_for <relative-path> -> download URLs, one per line.
+# VPN_SANAI_UPDATE_URL lets a GitHub-restricted network point at its own mirror
+# (jsDelivr, an internal cache, ...); otherwise the same mirrors the curl|bash
+# bootstrap uses are tried in order.
+_self_update_urls_for() {
+    local path="$1"
+    if [[ -n "${VPN_SANAI_UPDATE_URL:-}" ]]; then
+        printf '%s\n' "${VPN_SANAI_UPDATE_URL%/}/${path}"
+        return 0
+    fi
+    _bootstrap_urls_for "$path"
+}
+
+# _self_update_files -> every file a self-update has to refresh. bootstrap.sh
+# is missing from _bootstrap_files (it is the downloader itself).
+_self_update_files() {
+    # LIB_DIR only exists inside install.sh; the helper scripts/tests source the
+    # modules through load.sh, which exports ROOT_DIR instead.
+    local lib_dir="${LIB_DIR:-}"
+    [[ -n "$lib_dir" ]] || lib_dir="${SCRIPT_DIR:+${SCRIPT_DIR}/lib}"
+    [[ -n "$lib_dir" && -f "${lib_dir}/bootstrap.sh" ]] || lib_dir="${ROOT_DIR:-}/lib"
+
+    if [[ -z "${_bootstrap_files[@]+set}" && -f "${lib_dir}/bootstrap.sh" ]]; then
+        # shellcheck source=lib/bootstrap.sh
+        source "${lib_dir}/bootstrap.sh"
+    fi
+    [[ -n "${_bootstrap_files[@]+set}" ]] || return 1
+    printf '%s\n' "lib/bootstrap.sh" "${_bootstrap_files[@]}"
+}
+
+# _self_update_fetch <ref> <dest> -> download the whole tree into <dest>.
+# Returns non-zero when anything is missing, so the caller can abort before the
+# installed copy is touched.
+_self_update_fetch() {
+    local ref="$1" dest="$2" file url ok failed=0
+    local -a files=()
+
+    VPN_SANAI_REPO="${VPN_SANAI_REPO:-Alirezahjf/Vpn_sanai}"
+    VPN_SANAI_REF="$ref"
+    export VPN_SANAI_REPO VPN_SANAI_REF
+
+    mapfile -t files < <(_self_update_files) || return 1
+    ((${#files[@]} > 0)) || return 1
+
+    for file in "${files[@]}"; do
+        ok=0
+        while IFS= read -r url; do
+            mkdir -p "${dest}/$(dirname "$file")"
+            if curl -fsSL --connect-timeout 15 --retry 2 --retry-delay 2 --max-time 60 \
+                    -o "${dest}/${file}" "$url" 2>/dev/null && [[ -s "${dest}/${file}" ]]; then
+                ok=1
+                break
+            fi
+        done < <(_self_update_urls_for "$file")
+        if ((!ok)); then
+            log_error "دانلود ${file} ناموفق بود"
+            failed=$((failed + 1))
+        else
+            log_debug "دانلود شد: ${file}"
+        fi
+    done
+    ((failed == 0))
+}
+
+# action_self_update [ref] -> refresh the installed tool tree, restart the bot
+# and repair REALITY with the new code.
+#
+# Only /usr/local/lib/vpn-sanai (the tool) and the bot service are touched. The
+# panel database (/etc/x-ui) and the vpn-sanai state (/etc/vpn-sanai) are never
+# written, so inbounds, clients, credentials and links survive untouched.
+action_self_update() {
+    local ref="${1:-${VPN_SANAI_REF:-main}}"
+    local dest="${VPN_SANAI_LIBEXEC}"
+
+    detect_platform
+    log_step "به‌روزرسانی vpn-sanai از ${VPN_SANAI_REPO:-Alirezahjf/Vpn_sanai}@${ref}"
+
+    if ((VPN_SANAI_DRY_RUN)); then
+        log_info "[dry-run] مقصد: ${dest} — هیچ فایلی تغییر نمی‌کند"
+        return 0
+    fi
+
+    local tmp
+    tmp="$(mktemp -d /tmp/vpn-sanai-update.XXXXXX)" || die "ساخت پوشهٔ موقت ناموفق بود"
+
+    if ! _self_update_fetch "$ref" "$tmp"; then
+        rm -rf "$tmp"
+        die "دانلود فایل‌های جدید ناموفق بود (GitHub محدود است؟ از VPN_SANAI_UPDATE_URL استفاده کنید) — هیچ چیزی تغییر نکرد."
+    fi
+
+    # Never install a tree that does not parse: one broken file would take every
+    # vpn-sanai command and the bot down with it.
+    local f
+    for f in "$tmp/install.sh" "$tmp"/lib/*.sh "$tmp"/scripts/*.sh; do
+        [[ -f "$f" ]] || continue
+        if ! bash -n "$f" 2>/dev/null; then
+            rm -rf "$tmp"
+            die "فایل ${f#$tmp/} معتبر نیست؛ نصب لغو شد و نسخهٔ فعلی دست‌نخورده است."
+        fi
+    done
+
+    if [[ -d "$dest" ]]; then
+        local backup="${dest}.bak-$(date '+%Y%m%d-%H%M%S')"
+        if ! cp -a "$dest" "$backup"; then
+            rm -rf "$tmp"
+            die "پشتیبان‌گیری از نسخهٔ فعلی ناموفق بود؛ لغو شد."
+        fi
+        log_ok "پشتیبان نسخهٔ فعلی: ${backup}"
+    fi
+
+    ensure_dir "$dest" 755
+    local dir
+    for dir in lib config scripts; do
+        rm -rf "${dest:?}/${dir}"
+        if ! cp -a "${tmp}/${dir}" "${dest}/"; then
+            rm -rf "$tmp"
+            die "کپی ${dir} ناموفق بود؛ برای برگشت: cp -a ${backup:-/dev/null}/* ${dest}/"
+        fi
+    done
+    if ! cp -a "${tmp}/install.sh" "${dest}/install.sh"; then
+        rm -rf "$tmp"
+        die "کپی install.sh ناموفق بود"
+    fi
+    chmod +x "${dest}/install.sh" "${dest}"/scripts/*.sh 2>/dev/null || true
+    rm -rf "$tmp"
+    log_ok "ابزار به ${ref} به‌روزرسانی شد (${dest})"
+
+    # The /usr/local/bin/vpn-sanai* launchers already point at $dest, so the bot
+    # only needs a restart to pick the new commands (e.g. /fix) up.
+    local unit="${VPN_SANAI_TG_UNIT_NAME:-vpn-sanai-telegram}"
+    if has_cmd systemctl && [[ -f "/etc/systemd/system/${unit}.service" ]]; then
+        if systemctl restart "$unit" 2>/dev/null; then
+            log_ok "سرویس ربات تلگرام راه‌اندازی مجدد شد (دستور /fix فعال است)"
+        else
+            log_warn "راه‌اندازی مجدد ربات ناموفق بود: systemctl restart ${unit}"
+        fi
+    fi
+
+    # Repair with the *new* code. This process already holds the run lock, so
+    # the fresh modules are sourced here instead of re-executing install.sh.
+    log_step "بررسی و ترمیم Inboundهای REALITY"
+    if ( source "${dest}/lib/load.sh"
+         load_state_runtime 2>/dev/null
+         reality_repair_inbounds "" ); then
+        log_ok "پیکربندی REALITY سالم است"
+    else
+        log_warn "ترمیم REALITY انجام نشد؛ بعداً اجرا کنید: vpn-sanai --fix-reality"
+    fi
+}
+
+# action_fix_reality -> repair REALITY inbounds the panel stored with an empty
+# serverNames. Xray refuses to load such a config, which shows up in the panel
+# as "Xray خطا" with `empty "serverNames"` in the logs and takes every inbound
+# (and therefore every client) offline.
+action_fix_reality() {
+    state_load || die "ابتدا نصب را اجرا کنید"
+    PANEL_PORT="${PANEL_PORT:-$(state_get PANEL_PORT)}"
+    PANEL_BASE_PATH="$(state_get PANEL_BASE_PATH '/')"
+    PANEL_API_TOKEN="${PANEL_API_TOKEN:-$(state_get PANEL_API_TOKEN)}"
+    PANEL_SCHEME="${PANEL_SCHEME:-$(state_get PANEL_SCHEME http)}"
+    SERVER_IP="${SERVER_IP:-$(state_get SERVER_IP)}"
+    VLESS_SNI="${VLESS_SNI:-$(state_get VLESS_SNI)}"
+    detect_platform
+    api_is_authenticated 2>/dev/null || die "اتصال به API پنل برقرار نشد (پنل بالا است؟)"
+
+    log_step "بررسی و ترمیم Inboundهای REALITY"
+    reality_repair_inbounds "${VLESS_SNI_CHOICE:-}" || exit 1
 }
 
 action_add_client() {
@@ -1076,8 +1286,8 @@ action_menu() {
     print_rule "منوی مدیریت vpn-sanai"
     local choice=""
     local -a options=("نمایش وضعیت" "افزودن کلاینت" "نمایش لینک و QR" "پشتیبان‌گیری" \
-                      "نهایی‌سازی پورت SSH" "به‌روزرسانی پنل" "اجرای مجدد پیکربندی" \
-                      "تنظیم ربات تلگرام" "حذف نصب" "خروج")
+                      "ترمیم REALITY" "نهایی‌سازی پورت SSH" "به‌روزرسانی پنل" \
+                      "اجرای مجدد پیکربندی" "تنظیم ربات تلگرام" "حذف نصب" "خروج")
     if ((VPN_SANAI_NONINTERACTIVE)) || [[ ! -t 0 ]]; then
         show_status
         return 0
@@ -1092,11 +1302,12 @@ action_menu() {
         2) ask email "نام کلاینت" "user$(rand_string 4 '0-9')"; action_add_client "$email" ;;
         3) action_show_clients ;;
         4) state_load; backup_create "manual" ;;
-        5) state_load; ssh_finalize ;;
-        6) action_update_panel ;;
-        7) do_full_install ;;
-        8) action_telegram ;;
-        9) action_uninstall ;;
+        5) action_fix_reality ;;
+        6) state_load; ssh_finalize ;;
+        7) action_update_panel ;;
+        8) do_full_install ;;
+        9) action_telegram ;;
+        10) action_uninstall ;;
         *) log_info "خروج" ;;
     esac
 }
@@ -1135,6 +1346,8 @@ main() {
             ;;
         add-client)    action_add_client "${CLIENT_EMAILS[0]}" ;;
         show-clients)  action_show_clients ;;
+        fix-reality)   action_fix_reality ;;
+        update-self)   action_self_update "${SELF_UPDATE_REF}" ;;
         status)        show_status ;;
         backup)        backup_create "manual"; backup_prune ;;
         restore)       backup_restore "${RESTORE_FILE:-}" ;;

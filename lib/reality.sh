@@ -52,6 +52,23 @@ reality_short_id() {
     rand_hex 8
 }
 
+# --- validation --------------------------------------------------------------
+# reality_sni_valid <sni> -> 0 when the value can be used as a REALITY SNI.
+# Xray refuses to build a REALITY inbound whose serverNames is empty, and the
+# panel happily stores it anyway — the server then dies on the next xray start
+# with `infra/conf: empty "serverNames"`, taking *every* inbound down with it.
+# So the value is validated here, before anything is sent to the panel.
+reality_sni_valid() {
+    local sni="${1-}"
+    [[ -n "$sni" ]] || return 1
+    # Values read from files/command substitution can carry a trailing newline
+    # or padding, and REALITY matches the SNI byte for byte.
+    [[ "$sni" == "${sni//[[:space:]]/}" ]] || return 1
+    (( ${#sni} <= 253 )) || return 1
+    # A bare hostname: dot separated labels, no scheme, port or path.
+    [[ "$sni" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
+}
+
 # --- SNI / target selection --------------------------------------------------
 # probe_reality_target <host> [port] [timeout] -> prints RTT in ms
 # Requires TLS 1.3, HTTP/2, a certificate this server can validate, and (unless
@@ -128,6 +145,14 @@ reality_build_payload() {
     local share_addr="${13:-${SERVER_IP:-}}"
 
     local settings stream reality_settings
+
+    # Fail before touching the panel: an inbound the panel accepts but xray
+    # rejects is worse than no inbound at all, because the whole config then
+    # fails to load and every other inbound goes down with it.
+    reality_sni_valid "$sni" ||
+        die "SNI نامعتبر است: «${sni}» — REALITY بدون serverNames معتبر کار نمی‌کند (خطای xray: empty \"serverNames\"). با --sni HOST یک میزبان معتبر بدهید."
+    [[ -n "$priv" ]] || die "کلید خصوصی REALITY خالی است (privateKey)"
+    [[ -n "$sid" ]]  || die "shortId خالی است"
 
     settings="$(jq -nc \
         --arg id "$uuid" --arg email "$email" --arg subid "$subid" --arg flow "$flow" \
@@ -316,4 +341,166 @@ inbound_set_share_addr() {
     else
         log_debug "ثبت shareAddr ناموفق بود (لینک‌ها به‌صورت محلی ساخته می‌شوند)"
     fi
+}
+
+# --- doctor / repair ---------------------------------------------------------
+# reality_broken_inbounds <inbounds-json> -> prints "<id>\t<problem>" for every
+# REALITY inbound that xray would refuse to load.
+#
+# Xray validates the *whole* config at start-up, so one inbound with an empty
+# serverNames keeps every inbound (and therefore every client) offline. The
+# panel does not validate these fields, so the damage is invisible until the
+# "Xray خطا" badge shows up in the dashboard.
+reality_broken_inbounds() {
+    local list="${1:-[]}"
+    printf '%s' "$list" | jq -r '
+        def norm: if type == "string" then (fromjson? // {}) else (. // {}) end;
+        def clean: tostring | gsub("^[[:space:]]+|[[:space:]]+$"; "");
+        def names: (.serverNames // []) | (if type == "array" then . else [] end);
+        def blank_names: names
+            | map(select(. != null and (. | clean) != "")) | length;
+        .[]?
+        | . as $i
+        | ($i.streamSettings | norm) as $s
+        # a disabled inbound is not handed to xray at all
+        | select($i.enable != false)
+        | select(($s.security // "") == "reality")
+        | ($s.realitySettings // {}) as $r
+        | if ($r | blank_names) == 0 then "\($i.id | tostring)\tserverNames"
+          elif (($r.target // "") | clean) == "" then "\($i.id | tostring)\ttarget"
+          elif (($r.privateKey // "") | clean) == "" then "\($i.id | tostring)\tprivateKey"
+          else empty end' 2>/dev/null || true
+}
+
+# reality_health_warning -> loud warning when a REALITY inbound would keep xray
+# from starting. Never fails: it is called from status output, where a dead
+# panel must not turn into a broken status command.
+reality_health_warning() {
+    panel_installed 2>/dev/null || return 0
+    [[ -n "${PANEL_API_TOKEN:-}" ]] || return 0
+
+    local list broken
+    list="$(api_get_obj "/panel/api/inbounds/list" 2>/dev/null || true)"
+    [[ -n "$list" ]] || return 0
+    broken="$(reality_broken_inbounds "$list")"
+    [[ -n "$broken" ]] || return 0
+
+    log_warn "Inbound REALITY ناقص — xray استارت نمی‌خورد: $(printf '%s' "$broken" | tr '\t' ' ' | tr '\n' ' ')"
+    log_warn "ترمیم سریع:  vpn-sanai --fix-reality"
+    return 0
+}
+
+# reality_repair_inbounds [sni] -> fix every broken REALITY inbound and restart
+# xray. The SNI is taken from the argument, then the state file, then a fresh
+# probe. Returns 0 only when the panel no longer holds a broken inbound.
+reality_repair_inbounds() {
+    local sni="${1:-}"
+
+    local list
+    list="$(api_get_obj "/panel/api/inbounds/list" 2>/dev/null || true)"
+    if [[ -z "$list" ]]; then
+        log_error "فهرست Inboundها از پنل خوانده نشد"
+        return 1
+    fi
+
+    local -a targets=()
+    local id problem
+    while IFS=$'\t' read -r id problem; do
+        [[ -n "$id" ]] && targets+=("$id")
+    done < <(reality_broken_inbounds "$list")
+
+    if ((${#targets[@]} == 0)); then
+        log_ok "همهٔ Inboundهای REALITY سالم هستند"
+        return 0
+    fi
+
+    log_warn "${#targets[@]} Inbound REALITY ناقص پیدا شد (xray بدون serverNames استارت نمی‌خورد)"
+
+    reality_sni_valid "$sni" || sni="${VLESS_SNI:-}"
+    reality_sni_valid "$sni" || sni="$(pick_reality_sni "" 2>/dev/null || true)"
+    if ! reality_sni_valid "$sni"; then
+        log_error "SNI معتبری برای ترمیم پیدا نشد؛ با  --sni HOST  یک میزبان بدهید"
+        return 1
+    fi
+    log_info "SNI مورد استفاده برای ترمیم: ${sni}"
+
+    local fixed=0 failed=0 parked=0 inbound body key_empty
+    for id in "${targets[@]}"; do
+        inbound="$(inbound_get_json "$id" 2>/dev/null || true)"
+        if [[ -z "$inbound" ]]; then
+            log_error "Inbound ${id} خوانده نشد"
+            failed=$((failed + 1))
+            continue
+        fi
+
+        # Same shape inbound_set_share_addr uses (the panel replaces the row),
+        # with serverNames/target filled in only where they are broken.
+        body="$(printf '%s' "$inbound" | jq -c \
+            --arg sni "$sni" --arg tport "${REALITY_TARGET_PORT:-443}" '
+            def clean: tostring | gsub("^[[:space:]]+|[[:space:]]+$"; "");
+            {
+                up: (.up // 0), down: (.down // 0), total: (.total // 0),
+                remark: (.remark // ""), enable: (.enable // true),
+                expiryTime: (.expiryTime // 0), listen: (.listen // ""),
+                port: .port, protocol: .protocol,
+                settings: .settings, streamSettings: .streamSettings,
+                sniffing: .sniffing,
+                allocate: (.allocate // {strategy: "always", refresh: 5, concurrency: 3}),
+                shareAddrStrategy: (.shareAddrStrategy // "node"),
+                shareAddr: (.shareAddr // "")
+            }
+            | .streamSettings.realitySettings = (
+                (.streamSettings.realitySettings // {})
+                | (if (((.serverNames // []) | (if type == "array" then . else [] end)
+                        | map(select(. != null and (. | clean) != "")) | length) == 0)
+                   then .serverNames = [$sni] else . end)
+                | (if ((.target // "") | clean) == ""
+                   then .target = ($sni + ":" + $tport) else . end)
+              )
+            # A REALITY inbound without a privateKey can never work; xray would
+            # still refuse the whole config, so park it disabled and let the
+            # user delete it from the panel. (Top level: not inside the
+            # realitySettings object.)
+            | (if ((.streamSettings.realitySettings.privateKey // "") | clean) == ""
+               then .enable = false else . end)' 2>/dev/null)" || body=""
+
+        if [[ -z "$body" ]]; then
+            log_error "ساخت بدنهٔ ترمیم برای Inbound ${id} ناموفق بود"
+            failed=$((failed + 1))
+            continue
+        fi
+
+        key_empty="$(printf '%s' "$inbound" | jq -r \
+            '(.streamSettings.realitySettings.privateKey // "") | tostring
+             | gsub("^[[:space:]]+|[[:space:]]+$"; "")' 2>/dev/null || echo x)"
+
+        if api_silent POST "/panel/api/inbounds/update/${id}" "$body"; then
+            if [[ -z "$key_empty" ]]; then
+                log_warn "Inbound ${id} کلید خصوصی REALITY نداشت — قابل ترمیم نبود، غیرفعال شد (enable=false) تا Xray بالا بیاید. این Inbound را از پنل حذف کنید."
+                parked=$((parked + 1))
+            else
+                log_ok "Inbound ${id} ترمیم شد (serverNames=${sni})"
+                fixed=$((fixed + 1))
+            fi
+        else
+            log_error "به‌روزرسانی Inbound ${id} ناموفق بود: ${API_ERROR:-نامشخص}"
+            failed=$((failed + 1))
+        fi
+    done
+
+    ((failed == 0)) || log_warn "${failed} Inbound ترمیم نشد"
+
+    log_info "راه‌اندازی مجدد Xray"
+    xray_restart
+
+    # The panel keeps serving a broken config until xray accepts it, so verify.
+    sleep "${REALITY_REPAIR_WAIT:-2}"
+    local after
+    after="$(reality_broken_inbounds "$(api_get_obj "/panel/api/inbounds/list" 2>/dev/null || echo '[]')")"
+    if [[ -n "$after" ]]; then
+        log_error "هنوز Inbound ناقص باقی است: $(printf '%s' "$after" | tr '\t' ' ' | tr '\n' ' ')"
+        return 1
+    fi
+    log_ok "پیکربندی REALITY سالم شد و Xray راه‌اندازی مجدد شد (${fixed} ترمیم، ${parked} غیرفعال)"
+    return 0
 }

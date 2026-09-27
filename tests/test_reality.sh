@@ -282,3 +282,84 @@ test_reality_inbound_exists_tolerates_object_shape() {
     api_get_obj() { printf '%s' '[]'; }
     [[ -z "$(reality_inbound_exists 1443 tcp)" ]] || return 1
 }
+
+test_sni_validator() {
+    assert_true  reality_sni_valid "www.microsoft.com" "SNI معتبر" || return 1
+    assert_true  reality_sni_valid "xn--80ak6aa92e.com" "SNI یونیکد" || return 1
+    assert_false reality_sni_valid "" "SNI خالی" || return 1
+    assert_false reality_sni_valid "   " "SNI فاصله" || return 1
+    assert_false reality_sni_valid " x.com" "فاصلهٔ ابتدایی" || return 1
+    assert_false reality_sni_valid "http://x.com" "دارای پروتکل" || return 1
+    assert_false reality_sni_valid "x.com:443" "دارای پورت" || return 1
+    assert_false reality_sni_valid "localhost" "تک‌بخشی" || return 1
+    assert_false reality_sni_valid "a..b" "برچسب خالی" || return 1
+    return 0
+}
+
+test_payload_rejects_empty_sni() {
+    # The panel stores whatever it is given; xray then refuses to start the
+    # whole config with `empty "serverNames"`, so this must never be sent.
+    local payload
+    if payload="$(
+        reality_build_payload "00000000-0000-0000-0000-000000000001" "user1" "sub1" \
+            "xtls-rprx-vision" "443" "" "PRIV==" "0011223344556677" "PUB==" \
+            "remark" "tcp" "" "203.0.113.9" 2>/dev/null)"; then
+        fail "payload با SNI خالی نباید ساخته شود"
+        return 1
+    fi
+    return 0
+}
+
+test_payload_rejects_blank_key_material() {
+    local payload
+    if payload="$(
+        reality_build_payload "00000000-0000-0000-0000-000000000001" "user1" "sub1" \
+            "xtls-rprx-vision" "443" "www.example.org" "" "0011223344556677" "PUB==" \
+            "remark" "tcp" "" "203.0.113.9" 2>/dev/null)"; then
+        fail "payload با privateKey خالی نباید ساخته شود"
+        return 1
+    fi
+    if payload="$(
+        reality_build_payload "00000000-0000-0000-0000-000000000001" "user1" "sub1" \
+            "xtls-rprx-vision" "443" "www.example.org" "PRIV==" "" "PUB==" \
+            "remark" "tcp" "" "203.0.113.9" 2>/dev/null)"; then
+        fail "payload با shortId خالی نباید ساخته شود"
+        return 1
+    fi
+    return 0
+}
+
+test_broken_inbounds_detects_empty_server_names() {
+    local list out
+    list="$(jq -nc '
+        [ {id:1, port:443, protocol:"vless",
+           streamSettings:{network:"tcp", security:"reality",
+             realitySettings:{target:"a.com:443", serverNames:["a.com"], privateKey:"P"}}},
+          {id:2, port:26770, protocol:"vless",
+           streamSettings:{network:"tcp", security:"reality",
+             realitySettings:{target:"", serverNames:[], privateKey:"P"}}},
+          {id:3, port:8443, protocol:"vless",
+           streamSettings:{network:"tcp", security:"reality",
+             realitySettings:{target:"", serverNames:[""], privateKey:"P"}}},
+          {id:4, port:9443, protocol:"vless",
+           streamSettings:{network:"tcp", security:"reality",
+             realitySettings:{serverNames:["a.com"], privateKey:"P"}}},
+          {id:5, port:10443, protocol:"vless",
+           streamSettings:{network:"tcp", security:"reality",
+             realitySettings:{target:"a.com:443", serverNames:["a.com"]}}},
+          {id:6, port:80, protocol:"vless",
+           streamSettings:{network:"tcp", security:"none"}} ]')" || return 1
+
+    out="$(reality_broken_inbounds "$list")"
+    assert_eq $'2\tserverNames\n3\tserverNames\n4\ttarget\n5\tprivateKey' "$out" \
+        "تشخیص Inbound ناقص" || return 1
+
+    # the real panel serves settings/streamSettings as JSON *strings*
+    list="$(printf '%s' "$list" | jq -c 'map(.streamSettings |= tostring)')" || return 1
+    out="$(reality_broken_inbounds "$list")"
+    assert_eq $'2\tserverNames\n3\tserverNames\n4\ttarget\n5\tprivateKey' "$out" \
+        "تشخیص Inbound ناقص (شکل رشته‌ای پنل)" || return 1
+
+    assert_eq "" "$(reality_broken_inbounds '[]')" "فهرست خالی" || return 1
+    return 0
+}

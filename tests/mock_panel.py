@@ -494,6 +494,9 @@ def main() -> int:
     parser.add_argument("--base-path", default="/")
     parser.add_argument("--token", default="test-token")
     parser.add_argument("--log", default="")
+    parser.add_argument("--seed", default="",
+                        help="JSON file with pre-existing inbounds, e.g. one a "
+                             "broken panel/UI left behind")
     args = parser.parse_args()
 
     Handler.base_path = args.base_path
@@ -501,6 +504,28 @@ def main() -> int:
     Handler.log_file = args.log
     if args.log and os.path.exists(args.log):
         os.remove(args.log)
+
+    if args.seed:
+        # Seeded inbounds bypass _add_inbound on purpose: the real panel does
+        # not validate realitySettings, which is exactly how a server ends up
+        # with an inbound that xray refuses to load.
+        with open(args.seed, encoding="utf-8") as handle:
+            seeded = json.load(handle)
+        for record in seeded.get("inbounds", []):
+            inbound_id = record.get("id") or STATE["next_id"]
+            STATE["next_id"] = max(STATE["next_id"], inbound_id + 1)
+            entry = dict(record)
+            entry["id"] = inbound_id
+            for field in ("settings", "streamSettings", "sniffing"):
+                entry[field] = as_obj(entry.get(field))
+            for field, fallback in (("up", 0), ("down", 0), ("total", 0),
+                                    ("remark", ""), ("enable", True),
+                                    ("expiryTime", 0), ("listen", ""),
+                                    ("shareAddr", ""),
+                                    ("shareAddrStrategy", "node")):
+                entry.setdefault(field, fallback)
+            entry.setdefault("tag", f"inbound-{entry.get('port', 0)}")
+            STATE["inbounds"][inbound_id] = entry
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     port = httpd.server_address[1]

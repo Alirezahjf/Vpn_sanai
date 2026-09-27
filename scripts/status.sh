@@ -32,11 +32,17 @@ ensure_panel_reachable
 
 status_obj="$(api_get_obj "/panel/api/server/status" 2>/dev/null || echo '{}')"
 inbounds="$(api_get_obj "/panel/api/inbounds/list" 2>/dev/null || echo '[]')"
+# A REALITY inbound with an empty serverNames makes xray refuse the whole
+# config, so every inbound (and client) goes offline. Surface it, do not hide it.
+reality_issues="$(reality_broken_inbounds "$inbounds")"
 
 if ((JSON_OUT)); then
     jq -nc \
         --argjson status "$status_obj" \
         --argjson inbounds "$inbounds" \
+        --argjson reality_issues "$(printf '%s' "$reality_issues" | jq -R -s '
+            split("\n") | map(select(length > 0))
+            | map(split("\t") | {id: .[0], problem: .[1]})')" \
         --arg panel_url "${PANEL_SCHEME}://127.0.0.1:${PANEL_PORT}${PANEL_BASE_PATH}" \
         --arg server_ip "$SERVER_IP" \
         --arg vless_port "$VLESS_PORT" \
@@ -46,6 +52,7 @@ if ((JSON_OUT)); then
             panel: {url: $panel_url, version: $version},
             xray: ($status.xray // {}),
             server: {ip: $server_ip, vless_port: ($vless_port|tonumber? // 0), sni: $sni},
+            reality_issues: $reality_issues,
             inbounds: [ $inbounds[] | {
                 id, remark, port, protocol, enable,
                 clients: ((.settings|fromjson?).clients // [] | length),
@@ -78,6 +85,11 @@ printf '%s' "$inbounds" | jq -r '
     ] | @tsv' 2>/dev/null | while IFS=$'\t' read -r id remark port proto clients traffic; do
     printf '  %-5s %-22s %-7s %-9s %-8s %s\n' "$id" "$remark" "$port" "$proto" "$clients" "$traffic" >&2
 done
+
+if [[ -n "$reality_issues" ]]; then
+    log_warn "Inbound REALITY ناقص — xray استارت نمی‌خورد: $(printf '%s' "$reality_issues" | tr '\t' ' ' | tr '\n' ' ')"
+    log_warn "ترمیم:  vpn-sanai --fix-reality"
+fi
 
 if ((WITH_SECURITY)); then
     print_rule "امنیت"
